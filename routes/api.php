@@ -170,7 +170,7 @@ Route::get('/storage-link', function () {
 });
 Route::post('/employees', [EmployeeController::class, 'store']);
 Route::apiResource('sections', SectionController::class);
-Route::get('classes/{id}/sections', [SchoolClassController::class, 'getSectionsEmployee']);
+Route::get('classes/{class}/sections-to', [SchoolClassController::class, 'getSectionsClass']);
 Route::get('/employee-types', [EmployeeTypeController::class, 'index']);
 Route::get('/employee-types-all', [EmployeeTypeController::class, 'EmployeeAllType']);
 // Route::get('/user', function (Request $request) {
@@ -643,7 +643,9 @@ Route::get('/assessment-metadata', [AssessmentMetadataController::class, 'index'
     Route::apiResource('parent-wallets', ParentWalletController::class);
     Route::get('/parents-without-wallets', [ParentWalletController::class, 'getParentsWithoutWallets']);
     Route::get('/parent-wallets/{wallet}/transactions', [ParentWalletController::class, 'getTransactions']);
-
+    Route::get('/targeted-notifications/parents', [\App\Http\Controllers\TargetedNotificationController::class, 'getParentList']);
+    Route::post('/targeted-notifications/send', [\App\Http\Controllers\TargetedNotificationController::class, 'send']);
+    
     //
     Route::post('/parent-wallets/{wallet}/add-funds', [ParentWalletController::class, 'addFunds']);
 

@@ -119,6 +119,13 @@ class SchoolClassController extends Controller
             'data' => $class->sections()->get()
         ]);
     }
+    public function getSectionsClass(ClassRoom $class)
+    {
+        // باستخدام Route Model Binding، يتم جلب الفصل تلقائيًا
+        // ثم نرجع الشعب المرتبطة به مباشرةً
+        return response()->json($class->sections);
+    }
+
     
         public function getSectionsEmployee($id)
     {
