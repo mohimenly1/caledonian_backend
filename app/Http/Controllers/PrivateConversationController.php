@@ -6,6 +6,7 @@ namespace App\Http\Controllers;
 use App\Models\Message;
 use App\Models\PrivateConversation;
 use App\Models\User;
+use App\Notifications\NewPrivateMessageNotificationLatest;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
@@ -127,90 +128,111 @@ public function messages($conversationId)
     ]);
 }
 
-    public function sendMessage(Request $request, $conversationId)
-    {
-        Log::info('Starting message send process', [
-            'conversation_id' => $conversationId,
-            'request_data' => $request->all(),
-            'files' => $request->hasFile('media') ? 'Yes' : 'No'
+public function sendMessage(Request $request, $conversationId)
+{
+    Log::info('Starting message send process', [
+        'conversation_id' => $conversationId,
+        'request_data' => $request->all(),
+        'files' => $request->hasFile('media') ? 'Yes' : 'No'
+    ]);
+
+    $request->validate([
+        'content' => 'required_without:media|string|nullable',
+        'message_type' => 'required|in:text,image,video,audio,document',
+        'media' => 'required_if:message_type,image,video,audio,document|file|nullable',
+    ]);
+
+    try {
+        $conversation = PrivateConversation::findOrFail($conversationId);
+        $user = Auth::user(); // هذا هو المرسل
+
+        Log::info('User and conversation verified', [
+            'user_id' => $user->id,
+            'conversation_users' => [$conversation->user1_id, $conversation->user2_id]
         ]);
 
-        $request->validate([
-            'content' => 'required_without:media|string|nullable',
-            'message_type' => 'required|in:text,image,video,audio,document',
-            'media' => 'required_if:message_type,image,video,audio,document|file|nullable',
-        ]);
-
-        try {
-            $conversation = PrivateConversation::findOrFail($conversationId);
-            $user = Auth::user();
-
-            Log::info('User and conversation verified', [
+        if ($conversation->user1_id != $user->id && $conversation->user2_id != $user->id) {
+            Log::warning('Unauthorized message attempt', [
                 'user_id' => $user->id,
-                'conversation_users' => [$conversation->user1_id, $conversation->user2_id]
+                'conversation_id' => $conversationId
             ]);
-
-            // Verify user is part of this conversation
-            if ($conversation->user1_id != $user->id && $conversation->user2_id != $user->id) {
-                Log::warning('Unauthorized message attempt', [
-                    'user_id' => $user->id,
-                    'conversation_id' => $conversationId
-                ]);
-                return response()->json(['success' => false, 'message' => 'Unauthorized'], 403);
-            }
-
-            $otherUserId = $conversation->user1_id == $user->id ? $conversation->user2_id : $conversation->user1_id;
-
-            $mediaPath = null;
-            if ($request->hasFile('media')) {
-                Log::debug('Processing media file upload');
-                $mediaPath = $request->file('media')->store('private_messages', 'public');
-                Log::debug('Media stored at public path: ' . $mediaPath);
-            }
-
-            $messageData = [
-                'sender_id' => $user->id,
-                'recipient_id' => $otherUserId,
-                'private_conversation_id' => $conversation->id,
-                'content' => $request->input('content'),
-                'message_type' => $request->input('message_type'),
-                'media_path' => $mediaPath,
-            ];
-
-            Log::debug('Creating message with data:', $messageData);
-
-            $message = Message::create($messageData);
-
-            // Update conversation's last message timestamp
-            $conversation->update(['last_message_at' => now()]);
-
-            Log::info('Message created successfully', [
-                'message_id' => $message->id,
-                'conversation_updated' => $conversation->last_message_at
-            ]);
-
-            // Load sender relationship for response
-            $message->load('sender');
-
-            // Broadcast event would go here
-            // broadcast(new NewPrivateMessage($message))->toOthers();
-
-            return response()->json([
-                'success' => true,
-                'message' => $message,
-            ]);
-
-        } catch (\Exception $e) {
-            Log::error('Message sending failed', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ]);
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to send message: ' . $e->getMessage()
-            ], 500);
+            return response()->json(['success' => false, 'message' => 'Unauthorized'], 403);
         }
+
+        $otherUserId = $conversation->user1_id == $user->id ? $conversation->user2_id : $conversation->user1_id;
+
+        $mediaPath = null;
+        if ($request->hasFile('media')) {
+            Log::debug('Processing media file upload');
+            $mediaPath = $request->file('media')->store('private_messages', 'public');
+            Log::debug('Media stored at public path: ' . $mediaPath);
+        }
+
+        $messageData = [
+            'sender_id' => $user->id,
+            'recipient_id' => $otherUserId,
+            'private_conversation_id' => $conversation->id,
+            'content' => $request->input('content'),
+            'message_type' => $request->input('message_type'),
+            'media_path' => $mediaPath,
+        ];
+
+        Log::debug('Creating message with data:', $messageData);
+
+        $message = Message::create($messageData);
+
+        $conversation->update(['last_message_at' => now()]);
+
+        Log::info('Message created successfully', [
+            'message_id' => $message->id,
+            'conversation_updated' => $conversation->last_message_at
+        ]);
+        
+        // ✨ --- بداية إضافة منطق الإشعارات --- ✨
+
+        // 1. العثور على المستخدم المستلم
+        $recipient = User::find($otherUserId);
+
+        // 2. التحقق من وجود المستلم وأن لديه fcm_token
+        if ($recipient && $recipient->fcm_token) {
+            try {
+                // 3. إرسال الإشعار
+                $recipient->notify(new NewPrivateMessageNotificationLatest($message, $user));
+                Log::info('Push notification sent successfully.', ['recipient_id' => $recipient->id]);
+            } catch (\Exception $e) {
+                // تسجيل أي خطأ يحدث أثناء إرسال الإشعار دون إيقاف العملية
+                Log::error('Failed to send push notification.', [
+                    'recipient_id' => $recipient->id,
+                    'error' => $e->getMessage()
+                ]);
+            }
+        } else {
+            Log::warning('Recipient not found or does not have FCM token.', ['recipient_id' => $otherUserId]);
+        }
+        
+        // --- نهاية إضافة منطق الإشعارات --- ✨
+
+
+        $message->load('sender');
+
+        // broadcast(new NewPrivateMessage($message))->toOthers();
+
+        return response()->json([
+            'success' => true,
+            'message' => $message,
+        ]);
+
+    } catch (\Exception $e) {
+        Log::error('Message sending failed', [
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+        return response()->json([
+            'success' => false,
+            'message' => 'Failed to send message: ' . $e->getMessage()
+        ], 500);
     }
+}
 
     public function markAsRead($conversationId)
     {
