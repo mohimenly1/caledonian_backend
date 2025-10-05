@@ -98,13 +98,11 @@ public function messages($conversationId)
         'other_user_id' => $otherUser->id
     ]);
 
-    $messages = $conversation->messages()
-        ->with(['sender' => function($query) {
-            // قم بجلب كل الحقول الضرورية للمرسل أيضاً
-            $query->select('id', 'name', 'photo', 'last_activity', );
-        }])
-        ->orderBy('created_at', 'asc')
-        ->paginate(20);
+  $messages = $conversation->messages()
+    ->with(['sender:id,name,photo,last_activity'])
+    ->orderBy('created_at', 'asc')
+    ->get();
+
 
     Log::info('Messages fetched successfully', [
         'conversation_id' => $conversationId,
