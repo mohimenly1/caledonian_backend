@@ -677,29 +677,60 @@ public function index()
     }
 
     // Get group messages
-    public function getMessages(ChatGroup $group)
-    {
-        $user = Auth::user();
-        
-        if (!$group->is_public && !$group->members()->where('user_id', $user->id)->exists()) {
-            return response()->json(['message' => 'Unauthorized. This is a private group.'], 403);
-        }
-        
-        $messages = $group->messages()
-            ->with(['sender', 'statuses' => function($query) use ($user) {
-                $query->where('user_id', $user->id);
-            }])
-            ->orderBy('created_at', 'desc')
-            ->paginate(20);
-            
-        // Debug output
-        Log::info("Messages returned", [
-            'count' => $messages->count(),
-            'system_messages' => $messages->where('is_system_message', true)->count()
-        ]);
-        
-        return response()->json($messages);
+ public function getMessages(ChatGroup $group)
+{
+    $user = Auth::user();
+    
+    // تحقق من صلاحية المستخدم
+    if (!$group->is_public && !$group->members()->where('user_id', $user->id)->exists()) {
+        return response()->json(['message' => 'Unauthorized. This is a private group.'], 403);
     }
+
+    // ✅ جلب جميع الرسائل بترتيب زمني تصاعدي بدون paginate
+    $allMessages = $group->messages()
+        ->with([
+            'sender:id,name,photo,last_activity',
+            'statuses' => function($query) use ($user) {
+                $query->where('user_id', $user->id);
+            }
+        ])
+        ->orderBy('created_at', 'desc')
+        ->get();
+
+    // ✅ تعليم كل الرسائل المستلمة كمقروءة
+    $group->messages()
+        ->where('sender_id', '!=', $user->id)
+        ->where('is_read', false)
+        ->update([
+            'is_read' => true,
+            'read_at' => now(),
+        ]);
+
+    // ✅ نصنع نفس شكل الاستجابة السابق للـ Flutter (يحاكي paginate)
+    $response = [
+        'current_page' => 1,
+        'data' => $allMessages,
+        'first_page_url' => null,
+        'from' => 1,
+        'last_page' => 1,
+        'last_page_url' => null,
+        'links' => [],
+        'next_page_url' => null,
+        'path' => request()->url(),
+        'per_page' => $allMessages->count(),
+        'prev_page_url' => null,
+        'to' => $allMessages->count(),
+        'total' => $allMessages->count(),
+    ];
+
+    Log::info("Messages returned (no paginate)", [
+        'group_id' => $group->id,
+        'count' => $allMessages->count()
+    ]);
+
+    return response()->json($response);
+}
+
 
     // Send message to group
     public function sendMessage(Request $request, ChatGroup $group)
