@@ -13,6 +13,159 @@ use Illuminate\Support\Facades\Log;
 
 class PrivateConversationController extends Controller
 {
+
+    // أضف هذه الدوال إلى PrivateConversationController
+
+public function updateMessage(Request $request, $messageId)
+{
+    try {
+        $message = Message::findOrFail($messageId);
+        $user = Auth::user();
+
+        // التحقق من أن المستخدم هو مرسل الرسالة
+        if ($message->sender_id != $user->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized - You can only edit your own messages'
+            ], 403);
+        }
+
+        // التحقق من أن الرسالة نصية وليست وسائط
+        if ($message->message_type != 'text') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Only text messages can be edited'
+            ], 400);
+        }
+
+        // التحقق من أن الوقت المسموح للتعديل لم ينتهي (15 دقيقة مثلاً)
+        // $editTimeLimit = now()->subMinutes(15);
+        // if ($message->created_at < $editTimeLimit) {
+        //     return response()->json([
+        //         'success' => false,
+        //         'message' => 'Message can only be edited within 15 minutes of sending'
+        //     ], 400);
+        // }
+
+        $request->validate([
+            'content' => 'required|string|min:1'
+        ]);
+
+        $message->update([
+            'content' => $request->input('content'),
+            'is_edited' => true,
+            'edited_at' => now(),
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => $message->load('sender')
+        ]);
+
+    } catch (\Exception $e) {
+        Log::error('Error updating message', [
+            'message_id' => $messageId,
+            'error' => $e->getMessage()
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'message' => 'Failed to update message: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+public function deleteMessage($messageId)
+{
+    try {
+        $message = Message::withTrashed()->find($messageId);
+        
+        if (!$message) {
+            Log::warning("Message not found for deletion", ['message_id' => $messageId]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Message not found'
+            ], 404);
+        }
+
+        $user = Auth::user();
+
+        // التحقق من أن المستخدم هو مرسل الرسالة
+        if ($message->sender_id != $user->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized - You can only delete your own messages'
+            ], 403);
+        }
+
+        // ✅ احتفظ بالمحتوى الأصلي - لا تغيير في المحتوى
+        // فقط احذف الوسائط إذا كانت موجودة
+        if ($message->media_path) {
+            $message->update([
+                'media_path' => null, // إزالة الوسائط فقط
+            ]);
+        }
+        
+        // ✅ الحذف باستخدام SoftDeletes فقط
+        $message->delete();
+
+        Log::info("Message deleted successfully using SoftDeletes - Content preserved", [
+            'message_id' => $messageId,
+            'user_id' => $user->id,
+            'deleted_at' => $message->deleted_at,
+            'original_content_preserved' => true
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Message deleted successfully'
+        ]);
+
+    } catch (\Exception $e) {
+        Log::error('Error deleting message', [
+            'message_id' => $messageId,
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'message' => 'Failed to delete message: ' . $e->getMessage()
+        ], 500);
+    }
+}
+public function getMessageForEdit($messageId)
+{
+    try {
+        $message = Message::findOrFail($messageId);
+        $user = Auth::user();
+
+        // التحقق من أن المستخدم هو مرسل الرسالة
+        if ($message->sender_id != $user->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized'
+            ], 403);
+        }
+
+        // التحقق من إمكانية التعديل
+        $editTimeLimit = now()->subMinutes(15);
+        $canEdit = $message->created_at >= $editTimeLimit && $message->message_type == 'text';
+
+        return response()->json([
+            'success' => true,
+            'message' => $message->load('sender'),
+            'can_edit' => $canEdit,
+            'edit_time_limit' => 15 // دقائق
+        ]);
+
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Failed to fetch message: ' . $e->getMessage()
+        ], 500);
+    }
+}
     public function getOrCreateConversation($userId)
     {
         $otherUser = User::findOrFail($userId);
@@ -75,6 +228,7 @@ class PrivateConversationController extends Controller
     }
 
 // In PrivateConversationController.php
+// في PrivateConversationController - تحديث دالة messages:
 public function messages($conversationId)
 {
     Log::info('Fetching messages for conversation', ['conversation_id' => $conversationId]);
@@ -83,46 +237,62 @@ public function messages($conversationId)
     $user = Auth::user();
 
     if ($conversation->user1_id != $user->id && $conversation->user2_id != $user->id) {
-        Log::warning('Unauthorized access attempt to conversation', [
-            'user_id' => $user->id,
-            'conversation_id' => $conversationId
-        ]);
         return response()->json(['success' => false, 'message' => 'Unauthorized'], 403);
     }
 
     $otherUser = $conversation->otherUser($user);
     
-    Log::debug('Fetching messages with pagination', [
-        'conversation_id' => $conversationId,
-        'user_id' => $user->id,
-        'other_user_id' => $otherUser->id
-    ]);
+    // ✅ جلب الرسائل مع الردود والرسائل المحذوفة
+    $messages = $conversation->messages()
+        ->with([
+            'sender:id,name,photo,last_activity',
+            'repliedMessage.sender:id,name,photo',
+            'repliedMessage' => function($query) {
+                $query->withTrashed(); // ✅ تضمين الرسائل المحذوفة
+            }
+        ])
+        ->orderBy('created_at', 'asc')
+        ->get()
+        ->map(function ($message) {
+            $messageData = [
+                'id' => $message->id,
+                'content' => $message->content,
+                'message_type' => $message->message_type,
+                'sender' => $message->sender,
+                'is_read' => $message->is_read,
+                'is_edited' => $message->is_edited,
+                'created_at' => $message->created_at,
+                'reply_to_message_id' => $message->reply_to_message_id,
+                'replied_message' => $message->repliedMessage,
+                'media_path' => $message->media_path,
+            ];
 
-  $messages = $conversation->messages()
-    ->with(['sender:id,name,photo,last_activity'])
-    ->orderBy('created_at', 'asc')
-    ->get();
+            // ✅ إذا كانت الرسالة محذوفة
+            if ($message->trashed()) {
+                $messageData['is_deleted'] = true;
+                $messageData['deleted_at'] = $message->deleted_at;
+                // ✅ الحفاظ على البيانات الأساسية فقط
+                $messageData['content'] = 'تم حذف الرسالة';
+                $messageData['message_type'] = 'text';
+                $messageData['media_path'] = null;
+                $messageData['reply_to_message_id'] = null;
+                $messageData['replied_message'] = null;
+            } else {
+                $messageData['is_deleted'] = false;
+                $messageData['deleted_at'] = null;
+            }
 
+            return $messageData;
+        });
 
-    Log::info('Messages fetched successfully', [
-        'conversation_id' => $conversationId,
-        'message_count' => $messages->count()
-    ]);
-
-    // *** START OF FIX ***
-    // 1. قم بتحويل كائن المستخدم الآخر إلى مصفوفة لجلب كل بياناته تلقائياً
-    // هذا سيجلب (id, name, photo, gender, photo_url, etc.)
     $otherUserData = $otherUser->toArray();
-
-    // 2. أضف الحقول المحسوبة ديناميكياً
     $otherUserData['is_online'] = $otherUser->isOnline();
     $otherUserData['last_seen'] = $otherUser->lastSeen();
-    // *** END OF FIX ***
 
     return response()->json([
         'success' => true,
         'messages' => $messages,
-        'other_user' => $otherUserData, // 3. أرسل المصفوفة الكاملة
+        'other_user' => $otherUserData,
     ]);
 }
 
@@ -138,11 +308,12 @@ public function sendMessage(Request $request, $conversationId)
         'content' => 'required_without:media|string|nullable',
         'message_type' => 'required|in:text,image,video,audio,document',
         'media' => 'required_if:message_type,image,video,audio,document|file|nullable',
+        'reply_to_message_id' => 'nullable|exists:messages,id', // ✅ إضافة التحقق من صحة الرد
     ]);
 
     try {
         $conversation = PrivateConversation::findOrFail($conversationId);
-        $user = Auth::user(); // هذا هو المرسل
+        $user = Auth::user();
 
         Log::info('User and conversation verified', [
             'user_id' => $user->id,
@@ -166,6 +337,7 @@ public function sendMessage(Request $request, $conversationId)
             Log::debug('Media stored at public path: ' . $mediaPath);
         }
 
+        // ✅ إضافة reply_to_message_id إلى بيانات الرسالة
         $messageData = [
             'sender_id' => $user->id,
             'recipient_id' => $otherUserId,
@@ -173,6 +345,7 @@ public function sendMessage(Request $request, $conversationId)
             'content' => $request->input('content'),
             'message_type' => $request->input('message_type'),
             'media_path' => $mediaPath,
+            'reply_to_message_id' => $request->input('reply_to_message_id'), // ✅ حفظ الرد
         ];
 
         Log::debug('Creating message with data:', $messageData);
@@ -183,22 +356,18 @@ public function sendMessage(Request $request, $conversationId)
 
         Log::info('Message created successfully', [
             'message_id' => $message->id,
-            'conversation_updated' => $conversation->last_message_at
+            'conversation_updated' => $conversation->last_message_at,
+            'reply_to_message_id' => $request->input('reply_to_message_id') // ✅ تسجيل الرد
         ]);
         
         // ✨ --- بداية إضافة منطق الإشعارات --- ✨
-
-        // 1. العثور على المستخدم المستلم
         $recipient = User::find($otherUserId);
 
-        // 2. التحقق من وجود المستلم وأن لديه fcm_token
         if ($recipient && $recipient->fcm_token) {
             try {
-                // 3. إرسال الإشعار
                 $recipient->notify(new NewPrivateMessageNotificationLatest($message, $user));
                 Log::info('Push notification sent successfully.', ['recipient_id' => $recipient->id]);
             } catch (\Exception $e) {
-                // تسجيل أي خطأ يحدث أثناء إرسال الإشعار دون إيقاف العملية
                 Log::error('Failed to send push notification.', [
                     'recipient_id' => $recipient->id,
                     'error' => $e->getMessage()
@@ -207,13 +376,10 @@ public function sendMessage(Request $request, $conversationId)
         } else {
             Log::warning('Recipient not found or does not have FCM token.', ['recipient_id' => $otherUserId]);
         }
-        
         // --- نهاية إضافة منطق الإشعارات --- ✨
 
-
-        $message->load('sender');
-
-        // broadcast(new NewPrivateMessage($message))->toOthers();
+        // ✅ تحميل العلاقات بما في ذلك الرسالة المردودة
+        $message->load(['sender', 'repliedMessage.sender']);
 
         return response()->json([
             'success' => true,
@@ -232,42 +398,47 @@ public function sendMessage(Request $request, $conversationId)
     }
 }
 
-    public function markAsRead($conversationId)
-    {
-        $conversation = PrivateConversation::findOrFail($conversationId);
-        $user = Auth::user();
-    
-        // Verify user is part of this conversation
-        if ($conversation->user1_id != $user->id && $conversation->user2_id != $user->id) {
-            return response()->json(['success' => false, 'message' => 'Unauthorized'], 403);
-        }
-    
-        // Get the count of unread messages before updating
-        $unreadCount = $conversation->messages()
-            ->where('recipient_id', $user->id)
-            ->where('is_read', false)
-            ->count();
-    
-        // Mark all unread messages as read
-        $updated = $conversation->messages()
-            ->where('recipient_id', $user->id)
-            ->where('is_read', false)
-            ->update([
-                'is_read' => true,
-                'read_at' => now(),
-            ]);
-    
-        // Update the conversation's last activity if messages were marked as read
-        if ($updated > 0) {
-            $conversation->touch(); // Updates the updated_at timestamp
-        }
-    
-        return response()->json([
-            'success' => true,
-            'unread_count' => $unreadCount,
-            'updated_count' => $updated,
-        ]);
+public function markAsRead($conversationId)
+{
+    $conversation = PrivateConversation::findOrFail($conversationId);
+    $user = Auth::user();
+
+    // Verify user is part of this conversation
+    if ($conversation->user1_id != $user->id && $conversation->user2_id != $user->id) {
+        Log::error("User {$user->id} unauthorized to mark messages as read in conversation {$conversationId}");
+        return response()->json(['success' => false, 'message' => 'Unauthorized'], 403);
     }
+
+    // Get the count of unread messages before updating
+    $unreadCount = $conversation->messages()
+        ->where('recipient_id', $user->id)
+        ->where('is_read', false)
+        ->count();
+
+    Log::info("Marking {$unreadCount} messages as read for user {$user->id} in conversation {$conversationId}");
+
+    // Mark all unread messages as read
+    $updated = $conversation->messages()
+        ->where('recipient_id', $user->id)
+        ->where('is_read', false)
+        ->update([
+            'is_read' => true,
+            'read_at' => now(),
+        ]);
+
+    // Update the conversation's last activity if messages were marked as read
+    if ($updated > 0) {
+        $conversation->touch(); // Updates the updated_at timestamp
+    }
+
+    Log::info("Successfully marked {$updated} messages as read for user {$user->id}");
+
+    return response()->json([
+        'success' => true,
+        'unread_count' => $unreadCount,
+        'updated_count' => $updated,
+    ]);
+}
 
     public function unreadCount()
 {

@@ -15,15 +15,25 @@ class Message extends Model
         'message_type', 'media_path', 'is_read', 'read_at',
         'private_conversation_id', // Add this
         'is_system_message', // add this
-        'system_message_type' // add this (e.g., 'member_added', 'member_removed', etc.)
+        'system_message_type', // add this (e.g., 'member_added', 'member_removed', etc.)
+        'reply_to_message_id', // تأكد من وجود هذا الحقل
+        'is_edited', // إضافة هذا الحقل
+        'edited_at', // إضافة هذا الحقل
+        'is_deleted',
+        'deleted_at',
     ];
 
     protected $casts = [
         'is_system_message' => 'boolean',
         'is_read' => 'boolean',
-        'read_at' => 'datetime'
+        'read_at' => 'datetime',
+        'edited_at' => 'datetime',
+        'is_edited' => 'boolean',
+        'is_deleted' => 'boolean',
     ];
 
+
+    
     public function sender()
     {
         return $this->belongsTo(User::class, 'sender_id');
@@ -48,6 +58,17 @@ class Message extends Model
     return $this->belongsTo(PrivateConversation::class);
 }
 
+public function repliedMessage()
+{
+    return $this->belongsTo(Message::class, 'reply_to_message_id')->withTrashed();;
+}
+
+// العلاقة العكسية للرسائل التي تم الرد عليها
+public function replies()
+{
+    return $this->hasMany(Message::class, 'reply_to_message_id');
+}
+
 public function getConversationAttribute()
 {
     return $this->chat_group_id 
@@ -55,6 +76,15 @@ public function getConversationAttribute()
         : $this->privateConversation;
 }
 
+public function canBeEdited()
+{
+    $editTimeLimit = now()->subMinutes(15);
+    return $this->created_at >= $editTimeLimit;
+}
+public function getIsEditedAttribute($value)
+{
+    return (bool) $value; // تحويل null إلى false
+}
 public function getRecipientAttribute()
 {
     if ($this->chat_group_id) {

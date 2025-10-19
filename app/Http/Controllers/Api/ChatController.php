@@ -354,6 +354,27 @@ public function index()
         return response()->json($group);
     }
 
+
+    public function markAsRead(ChatGroup $group)
+{
+    $user = Auth::user();
+    
+    // Check if user is member of the group
+    if (!$group->members()->where('user_id', $user->id)->exists()) {
+        return response()->json(['message' => 'Unauthorized'], 403);
+    }
+    
+    // Mark all unread messages as read
+    $group->messages()
+        ->where('sender_id', '!=', $user->id)
+        ->where('is_read', false)
+        ->update([
+            'is_read' => true,
+            'read_at' => now(),
+        ]);
+    
+    return response()->json(['message' => 'Messages marked as read']);
+}
     // Update group (only for admins/moder)
     public function update(Request $request, ChatGroup $group)
     {
@@ -677,7 +698,8 @@ public function index()
     }
 
     // Get group messages
- public function getMessages(ChatGroup $group)
+// Get group messages
+public function getMessages(ChatGroup $group)
 {
     $user = Auth::user();
     
@@ -692,7 +714,8 @@ public function index()
             'sender:id,name,photo,last_activity',
             'statuses' => function($query) use ($user) {
                 $query->where('user_id', $user->id);
-            }
+            },
+            'repliedMessage.sender:id,name' // هذا سيرجع null إذا كانت الرسالة محذوفة
         ])
         ->orderBy('created_at', 'desc')
         ->get();
@@ -732,109 +755,159 @@ public function index()
 }
 
 
-    // Send message to group
-    public function sendMessage(Request $request, ChatGroup $group)
-    {
-        $user = Auth::user();
-        
-        // Check if user is member of the group and not blocked
-        $member = $group->members()
-            ->where('user_id', $user->id)
-            ->first();
-            
-        if (!$member || $member->pivot->is_blocked) {
-            return response()->json(['message' => 'Unauthorized'], 403);
-        }
-        
-        $validator = Validator::make($request->all(), [
-            'content' => 'required_without:media|string',
-            'media' => 'required_without:content|file|mimes:jpg,jpeg,png,gif,mp4,mov,avi,pdf,doc,docx,mp3,wav,xlsx,webm,aac,adts,m4a',
+// Get specific message for reply purposes
+// Get specific message for reply purposes
+public function getMessage(ChatGroup $group, $messageId)
+{
+    $user = Auth::user();
+    
+    // Check if user is member of the group
+    if (!$group->is_public && !$group->members()->where('user_id', $user->id)->exists()) {
+        return response()->json(['message' => 'Unauthorized'], 403);
+    }
+    
+    // Find the message by ID and ensure it belongs to the group
+    $message = Message::where('id', $messageId)
+        ->where('chat_group_id', $group->id)
+        ->with([
+            'sender:id,name,photo,last_activity',
+            'repliedMessage.sender:id,name'
+        ])
+        ->first();
+    
+    if (!$message) {
+        Log::warning("Message not found", [
+            'message_id' => $messageId,
+            'group_id' => $group->id,
+            'user_id' => $user->id
         ]);
         
-        if ($validator->fails()) {
-            return response()->json($validator->errors(), 422);
-        }
-        
-        $messageData = [
-            'sender_id' => $user->id,
-            'chat_group_id' => $group->id,
-            'content' => $request->content,
-            'message_type' => 'text', // default to text
-        ];
-        
-        if ($request->hasFile('media')) {
-            $file = $request->file('media');
-            $originalName = $file->getClientOriginalName();
-            $path = $file->storeAs('chat_media', $originalName, 'public');
-            $extension = strtolower($file->getClientOriginalExtension());
-            $mimeType = $file->getMimeType();
-        
-            $messageData['media_path'] = $path;
-        
-            // Determine message type
-            if (in_array($extension, ['aac', 'm4a', 'mp3', 'wav'])) {
-                $messageData['message_type'] = 'audio';
-            } elseif (str_starts_with($mimeType, 'image/')) {
-                $messageData['message_type'] = 'image';
-            } elseif (str_starts_with($mimeType, 'video/')) {
-                $messageData['message_type'] = 'video';
-            } else {
-                $messageData['message_type'] = 'document';
-            }
-        }
-        
-        $message = Message::create($messageData);
-        
-        // Create message status for all members except sender
-        $members = $group->members()
-            ->where('user_id', '!=', $user->id)
-            ->where('is_blocked', false)
-            ->pluck('user_id');
-            
-        $statuses = [];
-        foreach ($members as $memberId) {
-            $statuses[] = [
-                'message_id' => $message->id,
-                'user_id' => $memberId,
-                'is_read' => false,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ];
-        }
-        
-        if (!empty($statuses)) {
-            MessageStatus::insert($statuses);
-        }
-        
-        // Notify all group members except sender
-        $recipients = $group->members()
-            ->where('user_id', '!=', $user->id)
-            ->where('is_blocked', false)
-            ->get();
-        
-        $content = $message->content ?? $this->getMediaTypeForContent($message->message_type) ?? 'New message';
-        
-        foreach ($recipients as $recipient) {
-            // Store notification in database
-            $recipient->caledonianNotifications()->create([
-                'title' => 'New message in ' . $group->name,
-                'body' => $user->name . ': ' . $content,
-                'data' => [
-                    'type' => 'group_message',
-                    'group_id' => $group->id,
-                    'message_id' => $message->id,
-                    'sender_id' => $user->id,
-                ],
-            ]);
-            
-            // Send FCM notification if token exists
-            if ($recipient->fcm_token) {
-                $recipient->notify(new NewGroupMessageNotification($message));
-            }
-        }
-        
-        return response()->json($message, 201);
+        return response()->json([
+            'error' => 'Message not found or deleted',
+            'is_deleted' => true,
+            'content' => 'تم حذف الرسالة',
+            'sender' => ['name' => 'مستخدم'],
+            'message_type' => 'text'
+        ], 404);
     }
+    
+    Log::info("Message found", [
+        'message_id' => $message->id,
+        'group_id' => $group->id
+    ]);
+    
+    return response()->json($message);
+}
+
+    // Send message to group
+// Send message to group
+public function sendMessage(Request $request, ChatGroup $group)
+{
+    $user = Auth::user();
+    
+    // Check if user is member of the group and not blocked
+    $member = $group->members()
+        ->where('user_id', $user->id)
+        ->first();
+        
+    if (!$member || $member->pivot->is_blocked) {
+        return response()->json(['message' => 'Unauthorized'], 403);
+    }
+    
+    $validator = Validator::make($request->all(), [
+        'content' => 'required_without:media|string',
+        'media' => 'required_without:content|file|mimes:jpg,jpeg,png,gif,mp4,mov,avi,pdf,doc,docx,mp3,wav,xlsx,webm,aac,adts,m4a',
+        'reply_to_message_id' => 'nullable|exists:messages,id', // إضافة التحقق من الرد
+    ]);
+    
+    if ($validator->fails()) {
+        return response()->json($validator->errors(), 422);
+    }
+    
+    $messageData = [
+        'sender_id' => $user->id,
+        'chat_group_id' => $group->id,
+        'content' => $request->content,
+        'message_type' => 'text', // default to text
+        'reply_to_message_id' => $request->reply_to_message_id, // إضافة الرد
+    ];
+    
+    if ($request->hasFile('media')) {
+        $file = $request->file('media');
+        $originalName = $file->getClientOriginalName();
+        $path = $file->storeAs('chat_media', $originalName, 'public');
+        $extension = strtolower($file->getClientOriginalExtension());
+        $mimeType = $file->getMimeType();
+    
+        $messageData['media_path'] = $path;
+    
+        // Determine message type
+        if (in_array($extension, ['aac', 'm4a', 'mp3', 'wav'])) {
+            $messageData['message_type'] = 'audio';
+        } elseif (str_starts_with($mimeType, 'image/')) {
+            $messageData['message_type'] = 'image';
+        } elseif (str_starts_with($mimeType, 'video/')) {
+            $messageData['message_type'] = 'video';
+        } else {
+            $messageData['message_type'] = 'document';
+        }
+    }
+    
+    $message = Message::create($messageData);
+    
+    // تحميل معلومات الرسالة المردودة مع الاستجابة
+    $message->load(['repliedMessage.sender']);
+    
+    // Create message status for all members except sender
+    $members = $group->members()
+        ->where('user_id', '!=', $user->id)
+        ->where('is_blocked', false)
+        ->pluck('user_id');
+        
+    $statuses = [];
+    foreach ($members as $memberId) {
+        $statuses[] = [
+            'message_id' => $message->id,
+            'user_id' => $memberId,
+            'is_read' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ];
+    }
+    
+    if (!empty($statuses)) {
+        MessageStatus::insert($statuses);
+    }
+    
+    // Notify all group members except sender
+    $recipients = $group->members()
+        ->where('user_id', '!=', $user->id)
+        ->where('is_blocked', false)
+        ->get();
+    
+    $content = $message->content ?? $this->getMediaTypeForContent($message->message_type) ?? 'New message';
+    
+    foreach ($recipients as $recipient) {
+        // Store notification in database
+        $recipient->caledonianNotifications()->create([
+            'title' => 'New message in ' . $group->name,
+            'body' => $user->name . ': ' . $content,
+            'data' => [
+                'type' => 'group_message',
+                'group_id' => $group->id,
+                'message_id' => $message->id,
+                'sender_id' => $user->id,
+            ],
+        ]);
+        
+        // Send FCM notification if token exists
+        if ($recipient->fcm_token) {
+            $recipient->notify(new NewGroupMessageNotification($message));
+        }
+    }
+    
+    return response()->json($message, 201);
+}
     
     protected function getMediaTypeForContent(string $messageType): ?string
     {
@@ -987,12 +1060,75 @@ public function index()
     {
         $user = Auth::user();
         
+        // Check if user is the sender or has moder badge
         if ($message->sender_id !== $user->id && !$user->hasBadge('moder')) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
         
+        // Store message info for notification before deletion
+        $messageData = [
+            'id' => $message->id,
+            'chat_group_id' => $message->chat_group_id,
+            'sender_id' => $message->sender_id,
+            'content' => $message->content,
+        ];
+        
         $message->delete();
+        
+        // Broadcast deletion event if needed
+        // broadcast(new MessageDeleted($messageData))->toOthers();
         
         return response()->json(['message' => 'Message deleted successfully']);
     }
+    
+    // Get message for editing
+    public function getMessageForEdit(Message $message)
+    {
+        $user = Auth::user();
+        
+        // Check if user is the sender
+        if ($message->sender_id !== $user->id) {
+            return response()->json(['message' => 'Unauthorized'], 403);
+        }
+        
+        // Check edit time limit
+        $editTimeLimit = now()->subMinutes(15);
+        if ($message->created_at < $editTimeLimit) {
+            return response()->json(['message' => 'Edit time limit expired'], 403);
+        }
+        
+        return response()->json($message);
+    }
+
+    public function updateMessage(Request $request, Message $message)
+{
+    $user = Auth::user();
+    
+    // Check if user is the sender of the message
+    if ($message->sender_id !== $user->id) {
+        return response()->json(['message' => 'You can only edit your own messages'], 403);
+    }
+    
+
+    
+    $validator = Validator::make($request->all(), [
+        'content' => 'required|string|max:1000',
+    ]);
+    
+    if ($validator->fails()) {
+        return response()->json($validator->errors(), 422);
+    }
+    
+    // Update message content
+    $message->update([
+        'content' => $request->content,
+        'edited_at' => now(),
+        'is_edited' => true,
+    ]);
+    
+    // Reload relationships
+    $message->load(['sender:id,name,photo,last_activity', 'repliedMessage.sender:id,name']);
+    
+    return response()->json($message);
+}
 }

@@ -14,6 +14,7 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware) {
         //
+        
         $middleware->appendToGroup('web', \App\Http\Middleware\UpdateUserActivity::class);
         $middleware->appendToGroup('web', \App\Http\Middleware\VideoStreamMiddleware::class);
         $middleware->appendToGroup('api', \App\Http\Middleware\UpdateUserActivity::class);

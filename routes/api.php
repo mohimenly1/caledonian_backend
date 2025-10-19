@@ -131,6 +131,7 @@ use App\Http\Controllers\UserNotificationController;
 
 Route::get('/classes/form-data', [SchoolClassController::class, 'getFormData']);
 // Private conversations
+// Private conversations
 Route::prefix('private-conversations')->middleware('auth:sanctum')->group(function () {
     // Get or create conversation between current user and another user
     Route::post('/with/{userId}', [PrivateConversationController::class, 'getOrCreateConversation']);
@@ -147,6 +148,13 @@ Route::prefix('private-conversations')->middleware('auth:sanctum')->group(functi
     // Mark messages as read
     Route::post('/{conversationId}/mark-as-read', [PrivateConversationController::class, 'markAsRead']);
     Route::get('/unread-count', [PrivateConversationController::class, 'unreadCount']);
+    
+    // ✅ إضافة routes جديدة للتعديل والحذف - المسار الصحيح
+    Route::put('messages/{messageId}', [PrivateConversationController::class, 'updateMessage']);
+    Route::delete('/messages/{messageId}', [PrivateConversationController::class, 'deleteMessage']);
+    
+    // ✅ إضافة route للحصول على رسالة معينة للتعديل
+    Route::get('messages/{messageId}/edit', [PrivateConversationController::class, 'getMessageForEdit']);
 });
 
 // For parent-teacher specific routes
@@ -437,8 +445,13 @@ Route::post('/announcements/send', [AnnouncementController::class, 'send']);
 Route::post('/notifications/send-to-user', [UserNotificationController::class, 'sendToUser']);
 
 Route::get('/chat-groups/{group}/messages', [ChatController::class, 'getMessages']);
+Route::get('/chat-groups/{group}/messages/{messageId}', [ChatController::class, 'getMessage']); // إضافة هذا المسار
 Route::post('/chat-groups/{group}/messages', [ChatController::class, 'sendMessage']);
-Route::delete('/messages/{message}', [ChatController::class, 'deleteMessage']);
+Route::put('/messages/{message}', [ChatController::class, 'updateMessage']); // تحديث الرسالة
+Route::delete('/messages/{message}', [ChatController::class, 'deleteMessage']); // حذف الرسالة
+Route::get('/messages/{message}/edit', [ChatController::class, 'getMessageForEdit']); // جلب الرسالة للتعديل
+Route::post('/chat-groups/{group}/mark-as-read', [ChatController::class, 'markAsRead']);
+
 
 
 Route::post('/parent-arrivals/scan', [ParentArrivalController::class, 'processParentQrCode']);

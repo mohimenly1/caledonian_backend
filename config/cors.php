@@ -15,11 +15,11 @@ return [
     |
     */
 
-    'paths' => ['api/*', 'broadcasting/auth', 'sanctum/csrf-cookie'],
+    'paths' => ['api/*', 'broadcasting/auth', 'sanctum/csrf-cookie','storage/*'],
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => ['http://localhost:8080', 'http://127.0.0.1:8000', 'http://192.168.1.113:8080'],  // Your frontend's origin
+    'allowed_origins' => ['http://localhost:8080', 'http://127.0.0.1:8000', 'http://192.168.1.113:8080','http://172.20.10.2:8000'],  // Your frontend's origin
 
     'allowed_origins_patterns' => [],
 
