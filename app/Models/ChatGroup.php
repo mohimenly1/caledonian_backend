@@ -12,7 +12,7 @@ class ChatGroup extends Model
     use HasFactory, SoftDeletes;
 
     protected $fillable = [
-        'name', 'description', 'creator_id', 'is_public', 'class_id', 'section_id','image_path'
+        'name', 'description', 'creator_id', 'is_public', 'class_id', 'section_id','image_path','chat_disabled_for_parents'
     ];
 
     public function getImageUrlAttribute()
@@ -20,7 +20,7 @@ class ChatGroup extends Model
         if (!$this->image_path) {
             return asset('/cis_group.png');
         }
-        
+
         return Storage::url($this->image_path);
     }
     public function creator()

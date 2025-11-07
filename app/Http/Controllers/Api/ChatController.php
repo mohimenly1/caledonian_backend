@@ -52,7 +52,7 @@ private function createSystemMessage(ChatGroup $group, User $actor, string $cont
         })->toArray();
 
         MessageStatus::insert($statuses);
-        
+
         return $message;
     } catch (\Exception $e) {
         Log::error('Failed to create system message', [
@@ -67,15 +67,15 @@ private function createSystemMessage(ChatGroup $group, User $actor, string $cont
 private function formatMemberNames(array $userIds): string
 {
     $users = User::whereIn('id', $userIds)->get();
-    
+
     if ($users->count() === 1) {
         return $users->first()->name;
     }
-    
+
     if ($users->count() <= 3) {
         return $users->pluck('name')->join(', ', ' and ');
     }
-    
+
     return $users->first()->name . ' and ' . ($users->count() - 1) . ' others';
 }
 
@@ -88,75 +88,201 @@ private function formatMemberNames(array $userIds): string
                     ->where('blocker_id', Auth::id());
             })
             ->get();
-    
+
         return response()->json(['data' => $users]);
     }
 
 /**
  * Filter users by class/section/type
+ *
+ * This method filters users based on:
+ * - user_type: 'parent', 'teacher', 'student', or null (all)
+ * - class_id: Filter by class
+ * - section_id: Filter by section (optional)
+ *
+ * For parents: Finds parents whose children study in the specified class/section
+ * For teachers: Finds teachers assigned to the specified class/section
+ * For students: Finds students in the specified class/section
  */
 public function filterUsers(Request $request)
 {
-    $query = User::query()->with(['student.class', 'student.section', 'employee.classes']);
+    Log::debug("[FilterUsers] بداية الدالة - الفلاتر المستلمة", [
+        'class_id' => $request->class_id,
+        'section_id' => $request->section_id,
+        'user_type' => $request->user_type,
+        'all_request' => $request->all()
+    ]);
 
-    if ($request->class_id) {
-        $query->where(function($q) use ($request) {
-            // Students in the class
-            $q->whereHas('student', function($q) use ($request) {
-                $q->where('class_id', $request->class_id);
-                
-                if ($request->section_id) {
-                    $q->where('section_id', $request->section_id);
-                }
-            });
-            
-            // Teachers assigned to the class
-            $q->orWhereHas('employee', function($q) use ($request) {
-                $q->where('is_teacher', true)
-                  ->whereHas('classes', function($q) use ($request) {
-                      $q->where('class_id', $request->class_id);
-                  });
-                
-                if ($request->section_id) {
-                    $q->whereHas('sections', function($q) use ($request) {
-                        $q->where('section_id', $request->section_id);
-                    });
-                }
-            });
-        });
-    }
+    $query = User::query()->with(['student.class', 'student.section', 'employee.classes', 'parentInfo']);
 
+    // ✅ بناء الاستعلام بناءً على نوع المستخدم
     if ($request->user_type) {
-        $query->where('user_type', $request->user_type);
-        
-        // For parents, we need to find parents of students in the selected class/section
+        Log::debug("[FilterUsers] بناء الاستعلام لنوع المستخدم", [
+            'user_type' => $request->user_type,
+            'class_id' => $request->class_id,
+            'section_id' => $request->section_id
+        ]);
+
         if ($request->user_type === 'parent') {
-            $query->whereHas('parent', function($q) use ($request) {
-                $q->whereHas('students', function($q) use ($request) {
-                    if ($request->class_id) {
-                        $q->where('class_id', $request->class_id);
-                    }
+            // ✅ البحث عن أولياء الأمور الذين لديهم أبناء في الفصل/الشعبة المحددة
+            $query->where('user_type', 'parent');
+
+            if ($request->class_id) {
+                // البحث عن أولياء الأمور من خلال ParentInfo -> Students -> Class
+                $query->whereHas('parentInfo.students', function($q) use ($request) {
+                    $q->where('class_id', $request->class_id);
+
                     if ($request->section_id) {
                         $q->where('section_id', $request->section_id);
                     }
                 });
+
+                Log::debug("[FilterUsers] البحث عن أولياء الأمور للفصل", [
+                    'class_id' => $request->class_id,
+                    'section_id' => $request->section_id
+                ]);
+            }
+
+        } elseif ($request->user_type === 'teacher') {
+            // ✅ البحث عن المعلمين المسندين للفصل/الشعبة المحددة
+            $query->where('user_type', 'teacher');
+
+            if ($request->class_id) {
+                $query->whereHas('employee', function($q) use ($request) {
+                    $q->where('is_teacher', true)
+                      ->whereHas('classes', function($q) use ($request) {
+                          $q->where('class_id', $request->class_id);
+                      });
+
+                    if ($request->section_id) {
+                        $q->whereHas('sections', function($q) use ($request) {
+                            $q->where('section_id', $request->section_id);
+                        });
+                    }
+                });
+
+                Log::debug("[FilterUsers] البحث عن المعلمين للفصل", [
+                    'class_id' => $request->class_id,
+                    'section_id' => $request->section_id
+                ]);
+            }
+
+        } elseif ($request->user_type === 'student') {
+            // ✅ البحث عن الطلاب في الفصل/الشعبة المحددة
+            $query->where('user_type', 'student');
+
+            if ($request->class_id) {
+                $query->whereHas('student', function($q) use ($request) {
+                    $q->where('class_id', $request->class_id);
+
+                    if ($request->section_id) {
+                        $q->where('section_id', $request->section_id);
+                    }
+                });
+
+                Log::debug("[FilterUsers] البحث عن الطلاب للفصل", [
+                    'class_id' => $request->class_id,
+                    'section_id' => $request->section_id
+                ]);
+            }
+
+        } else {
+            // ✅ أنواع أخرى من المستخدمين (بدون فلاتر class_id)
+            $query->where('user_type', $request->user_type);
+        }
+
+    } else {
+        // ✅ إذا لم يتم تحديد user_type، البحث عن جميع المستخدمين (معلمين وأولياء أمور) في الفصل
+        if ($request->class_id) {
+            $query->where(function($q) use ($request) {
+                // Teachers assigned to the class
+                $q->whereHas('employee', function($q) use ($request) {
+                    $q->where('is_teacher', true)
+                      ->whereHas('classes', function($q) use ($request) {
+                          $q->where('class_id', $request->class_id);
+                      });
+
+                    if ($request->section_id) {
+                        $q->whereHas('sections', function($q) use ($request) {
+                            $q->where('section_id', $request->section_id);
+                        });
+                    }
+                });
+
+                // Parents whose children study in the class
+                $q->orWhere(function($parentQuery) use ($request) {
+                    $parentQuery->where('user_type', 'parent')
+                               ->whereHas('parentInfo.students', function($q) use ($request) {
+                                   $q->where('class_id', $request->class_id);
+
+                                   if ($request->section_id) {
+                                       $q->where('section_id', $request->section_id);
+                                   }
+                               });
+                });
             });
+
+            Log::debug("[FilterUsers] البحث عن جميع المستخدمين (معلمين وأولياء أمور) للفصل", [
+                'class_id' => $request->class_id,
+                'section_id' => $request->section_id
+            ]);
         }
     }
 
+    // ✅ تسجيل SQL Query قبل التنفيذ
+    $sqlQuery = $query->toSql();
+    $sqlBindings = $query->getBindings();
+
+    Log::debug("[FilterUsers] SQL Query قبل التنفيذ", [
+        'sql' => $sqlQuery,
+        'bindings' => $sqlBindings
+    ]);
+
+    // ✅ تنفيذ Query
     $users = $query->get();
+
+    // ✅ تسجيل تفصيلي عن النتائج
+    Log::debug("[FilterUsers] النتائج المسترجعة", [
+        'total_count' => $users->count(),
+        'users' => $users->map(function($user) {
+            return [
+                'id' => $user->id,
+                'name' => $user->name,
+                'user_type' => $user->user_type,
+                'email' => $user->email,
+                'has_student' => $user->student !== null,
+                'has_employee' => $user->employee !== null,
+                'has_parent_info' => $user->parentInfo !== null,
+                'parent_info_id' => $user->parentInfo->id ?? null,
+                'parent_info_name' => $user->parentInfo ?
+                    ($user->parentInfo->first_name . ' ' . $user->parentInfo->last_name) : null,
+                'students_count' => $user->parentInfo ? $user->parentInfo->students->count() : 0
+            ];
+        })->toArray()
+    ]);
+
+    // ✅ تسجيل ملخص نهائي
+    Log::debug("[FilterUsers] ملخص نهائي", [
+        'filters' => [
+            'class_id' => $request->class_id,
+            'section_id' => $request->section_id,
+            'user_type' => $request->user_type
+        ],
+        'result_count' => $users->count(),
+        'user_types' => $users->groupBy('user_type')->map->count()
+    ]);
 
     return response()->json(['data' => $users]);
 }
 public function getUnreadCount(ChatGroup $group)
 {
     $user = Auth::user();
-    
+
     // Check if user is member of the group
     if (!$group->members()->where('user_id', $user->id)->exists()) {
         return response()->json(['message' => 'Unauthorized'], 403);
     }
-    
+
     $unreadCount = $group->messages()
         ->where('sender_id', '!=', $user->id)
         ->whereDoesntHave('statuses', function($query) use ($user) {
@@ -164,7 +290,7 @@ public function getUnreadCount(ChatGroup $group)
                   ->where('is_read', true);
         })
         ->count();
-    
+
     return response()->json(['count' => $unreadCount]);
 }
 
@@ -175,7 +301,7 @@ public function index()
 
     // جلب المجموعات التي ينتمي إليها المستخدم
     $userGroupsQuery = $user->groups();
-    
+
     // جلب المجموعات العامة التي لا ينتمي إليها المستخدم
     $publicGroupsQuery = ChatGroup::where('is_public', true)
                                ->whereDoesntHave('members', function ($query) use ($user) {
@@ -204,17 +330,17 @@ public function index()
             'section_id' => 'nullable|exists:sections,id',
             'image' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
         ]);
-    
+
         if ($validator->fails()) {
             return response()->json($validator->errors(), 422);
         }
-    
+
         $user = Auth::user();
-        
+
         if (!$user->hasBadge('moder') && $request->is_public) {
             return response()->json(['message' => 'Only moderators can create public groups'], 403);
         }
-    
+
         $data = [
             'name' => $request->name,
             'description' => $request->description,
@@ -223,7 +349,7 @@ public function index()
             'class_id' => $request->class_id,
             'section_id' => $request->section_id,
         ];
-    
+
         // Handle image upload
         if ($request->hasFile('image')) {
             $path = $request->file('image')->store('group_images', 'public');
@@ -234,17 +360,17 @@ public function index()
         } else {
             $data['image_path'] = 'cis_group.png';
         }
-    
+
         $group = ChatGroup::create($data);
-    
+
         // Add creator as admin member
         $group->members()->attach($user->id, ['is_admin' => true]);
-    
+
         // If it's a class/section group, add members automatically
         if ($request->class_id) {
             $this->addClassMembersToGroup($group, $request->class_id, $request->section_id);
         }
-    
+
         return response()->json($group, 201);
     }
 
@@ -252,13 +378,13 @@ public function index()
     {
         // Get all students in the class/section
         $query = Student::where('class_id', $classId);
-        
+
         if ($sectionId) {
             $query->where('section_id', $sectionId);
         }
-        
+
         $students = $query->with('user')->get();
-        
+
         // Get all teachers assigned to this class/section
         $teachers = Employee::where('is_teacher', true)
             ->whereHas('classes', function($q) use ($classId) {
@@ -271,24 +397,24 @@ public function index()
             })
             ->with('user')
             ->get();
-        
+
         // Prepare sync data
         $syncData = [];
         $addedUserIds = [];
-        
+
         // Add students and their parents
         foreach ($students as $student) {
             if ($student->user) {
                 $syncData[$student->user->id] = ['is_admin' => false];
                 $addedUserIds[] = $student->user->id;
             }
-            
+
             if ($student->parent && $student->parent->user) {
                 $syncData[$student->parent->user->id] = ['is_admin' => false];
                 $addedUserIds[] = $student->parent->user->id;
             }
         }
-        
+
         // Add teachers as admins
         foreach ($teachers as $teacher) {
             if ($teacher->user) {
@@ -296,10 +422,10 @@ public function index()
                 $addedUserIds[] = $teacher->user->id;
             }
         }
-        
+
         // Sync all members at once
         $group->members()->syncWithoutDetaching($syncData);
-        
+
         // Create system message
         $addedNames = $this->formatMemberNames($addedUserIds);
         $this->createSystemMessage(
@@ -308,7 +434,7 @@ public function index()
             "Class members added to the group: $addedNames",
             'members_added'
         );
-        
+
         // Notify new members
         foreach ($addedUserIds as $userId) {
             $user = User::find($userId);
@@ -328,29 +454,29 @@ public function index()
     if (!$this->image_path) {
         return asset('cis_group.png'); // Make sure this default image exists
     }
-    
+
     // Check if the path is already a URL
     if (filter_var($this->image_path, FILTER_VALIDATE_URL)) {
         return $this->image_path;
     }
-    
+
     return Storage::url($this->image_path);
 }
     // Get group details
     public function show(ChatGroup $group)
     {
         $user = Auth::user();
-        
+
         if (!$group->is_public && !$group->members()->where('user_id', $user->id)->exists()) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
-        
+
         $group->load(['members' => function($query) {
             $query->where('is_blocked', false)
                   ->select(['users.id', 'users.name', 'users.user_type', 'users.last_activity'])
                   ->with('badges');
         }, 'creator']);
-        
+
         return response()->json($group);
     }
 
@@ -358,12 +484,12 @@ public function index()
     public function markAsRead(ChatGroup $group)
 {
     $user = Auth::user();
-    
+
     // Check if user is member of the group
     if (!$group->members()->where('user_id', $user->id)->exists()) {
         return response()->json(['message' => 'Unauthorized'], 403);
     }
-    
+
     // Mark all unread messages as read
     $group->messages()
         ->where('sender_id', '!=', $user->id)
@@ -372,41 +498,41 @@ public function index()
             'is_read' => true,
             'read_at' => now(),
         ]);
-    
+
     return response()->json(['message' => 'Messages marked as read']);
 }
     // Update group (only for admins/moder)
     public function update(Request $request, ChatGroup $group)
     {
         $user = Auth::user();
-        
+
         // Check if user is admin of the group or has moder badge
         $isAdmin = $group->members()
             ->where('user_id', $user->id)
             ->where('is_admin', true)
             ->exists();
-            
+
         if (!$isAdmin && !$user->hasBadge('moder')) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
-        
+
         $validator = Validator::make($request->all(), [
             'name' => 'sometimes|string|max:255',
             'description' => 'nullable|string',
             'is_public' => 'sometimes|boolean',
         ]);
-        
+
         if ($validator->fails()) {
             return response()->json($validator->errors(), 422);
         }
-        
+
         // Only moder can change public/private status
         if ($request->has('is_public') && !$user->hasBadge('moder')) {
             return response()->json(['message' => 'Only moderators can change group visibility'], 403);
         }
-        
+
         $group->update($request->only(['name', 'description', 'is_public']));
-        
+
         return response()->json($group);
     }
 
@@ -414,13 +540,13 @@ public function index()
     public function destroy(ChatGroup $group)
     {
         $user = Auth::user();
-        
+
         if ($group->creator_id !== $user->id && !$user->hasBadge('moder')) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
-        
+
         $group->delete();
-        
+
         return response()->json(['message' => 'Group deleted successfully']);
     }
 
@@ -428,34 +554,34 @@ public function index()
     public function addMembers(Request $request, ChatGroup $group)
     {
         $user = Auth::user();
-        
+
         // Check if user is admin of the group or has moder badge
         $isAdmin = $group->members()
             ->where('user_id', $user->id)
             ->where('is_admin', true)
             ->exists();
-            
+
         if (!$isAdmin && !$user->hasBadge('moder')) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
-        
+
         $validator = Validator::make($request->all(), [
             'user_ids' => 'required|array',
             'user_ids.*' => 'exists:users,id',
             'as_admin' => 'sometimes|boolean',
         ]);
-        
+
         if ($validator->fails()) {
             return response()->json($validator->errors(), 422);
         }
-        
+
         $syncData = [];
         foreach ($request->user_ids as $userId) {
             $syncData[$userId] = ['is_admin' => $request->as_admin ?? false];
         }
-        
+
         $group->members()->syncWithoutDetaching($syncData);
-    
+
         // Create system message
         $addedNames = $this->formatMemberNames($request->user_ids);
         $adminStatus = $request->as_admin ? ' as admin' : '';
@@ -465,7 +591,7 @@ public function index()
             "{$user->name} added $addedNames to the group{$adminStatus}",
             'member_added'
         );
-    
+
         foreach ($request->user_ids as $userId) {
             $newMember = User::find($userId);
             if ($newMember && $newMember->fcm_token) {
@@ -476,7 +602,7 @@ public function index()
                 ));
             }
         }
-    
+
         // Notify existing members about new members
         $existingMembers = $group->members()
             ->whereNotIn('user_id', $request->user_ids)
@@ -484,7 +610,7 @@ public function index()
             ->with('user')
             ->get()
             ->pluck('user');
-    
+
         foreach ($existingMembers as $member) {
             if ($member->fcm_token) {
                 $member->notify(new GroupActivityNotification(
@@ -494,7 +620,7 @@ public function index()
                 ));
             }
         }
-        
+
         return response()->json(['message' => 'Members added successfully']);
     }
 
@@ -502,36 +628,36 @@ public function index()
     public function removeMembers(Request $request, ChatGroup $group)
     {
         $user = Auth::user();
-        
+
         // Check if user is admin of the group or has moder badge
         $isAdmin = $group->members()
             ->where('user_id', $user->id)
             ->where('is_admin', true)
             ->exists();
-            
+
         if (!$isAdmin && !$user->hasBadge('moder')) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
-        
+
         $validator = Validator::make($request->all(), [
             'user_ids' => 'required|array',
             'user_ids.*' => 'exists:users,id',
         ]);
-        
+
         if ($validator->fails()) {
             return response()->json($validator->errors(), 422);
         }
-        
+
         // Can't remove yourself unless you're moder
         if (in_array($user->id, $request->user_ids)) {
             if (!$user->hasBadge('moder')) {
                 return response()->json(['message' => 'You cannot remove yourself'], 403);
             }
         }
-        
+
         $removedNames = $this->formatMemberNames($request->user_ids);
         $group->members()->detach($request->user_ids);
-        
+
         // Create system message
         $this->createSystemMessage(
             $group,
@@ -539,7 +665,7 @@ public function index()
             "{$user->name} removed $removedNames from the group",
             'member_removed'
         );
-        
+
         return response()->json(['message' => 'Members removed successfully']);
     }
 
@@ -547,32 +673,32 @@ public function index()
     public function blockMembers(Request $request, ChatGroup $group)
     {
         $user = Auth::user();
-        
+
         // Check if user is admin of the group or has moder badge
         $isAdmin = $group->members()
             ->where('user_id', $user->id)
             ->where('is_admin', true)
             ->exists();
-            
+
         if (!$isAdmin && !$user->hasBadge('moder')) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
-        
+
         $validator = Validator::make($request->all(), [
             'user_ids' => 'required|array',
             'user_ids.*' => 'exists:users,id',
             'block' => 'required|boolean',
         ]);
-        
+
         if ($validator->fails()) {
             return response()->json($validator->errors(), 422);
         }
-        
+
         // Can't block yourself
         if (in_array($user->id, $request->user_ids)) {
             return response()->json(['message' => 'You cannot block yourself'], 403);
         }
-        
+
         foreach ($request->user_ids as $userId) {
             $group->members()->updateExistingPivot($userId, [
                 'is_blocked' => $request->block,
@@ -580,10 +706,10 @@ public function index()
                 'blocked_at' => $request->block ? now() : null,
             ]);
         }
-        
+
         $action = $request->block ? 'blocked' : 'unblocked';
         $userNames = $this->formatMemberNames($request->user_ids);
-        
+
         // Create system message
         $this->createSystemMessage(
             $group,
@@ -591,7 +717,7 @@ public function index()
             "{$user->name} $action $userNames in the group",
             'member_' . $action
         );
-        
+
         return response()->json(['message' => "Members {$action} successfully"]);
     }
 
@@ -599,43 +725,43 @@ public function index()
     public function updateMemberRole(Request $request, ChatGroup $group)
     {
         $user = Auth::user();
-        
+
         // Check if user is admin of the group or has moder badge
         $isAdmin = $group->members()
             ->where('user_id', $user->id)
             ->where('is_admin', true)
             ->exists();
-            
+
         if (!$isAdmin && !$user->hasBadge('moder')) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
-        
+
         $validator = Validator::make($request->all(), [
             'user_ids' => 'required|array',
             'user_ids.*' => 'exists:users,id',
             'as_admin' => 'required|boolean',
         ]);
-        
+
         if ($validator->fails()) {
             return response()->json($validator->errors(), 422);
         }
-        
+
         // Can't demote yourself unless you're moder
         if (in_array($user->id, $request->user_ids) && !$request->as_admin) {
             if (!$user->hasBadge('moder')) {
                 return response()->json(['message' => 'You cannot demote yourself'], 403);
             }
         }
-        
+
         foreach ($request->user_ids as $userId) {
             $group->members()->updateExistingPivot($userId, [
                 'is_admin' => $request->as_admin,
             ]);
         }
-        
+
         $action = $request->as_admin ? 'promoted' : 'demoted';
         $userNames = $this->formatMemberNames($request->user_ids);
-        
+
         // Create system message
         $this->createSystemMessage(
             $group,
@@ -643,7 +769,7 @@ public function index()
             "{$user->name} $action $userNames to " . ($request->as_admin ? 'admin' : 'member'),
             'member_role_changed'
         );
-        
+
         return response()->json(['message' => "Members {$action} successfully"]);
     }
 
@@ -651,17 +777,17 @@ public function index()
     public function joinGroup(ChatGroup $group)
     {
         $user = Auth::user();
-        
+
         if (!$group->is_public) {
             return response()->json(['message' => 'This is not a public group'], 403);
         }
-        
+
         if ($group->members()->where('user_id', $user->id)->exists()) {
             return response()->json(['message' => 'You are already a member'], 400);
         }
-        
+
         $group->members()->attach($user->id, ['is_admin' => false]);
-        
+
         // Create system message
         $this->createSystemMessage(
             $group,
@@ -669,7 +795,7 @@ public function index()
             "{$user->name} joined the group",
             'member_joined'
         );
-        
+
         return response()->json(['message' => 'Joined group successfully']);
     }
 
@@ -677,13 +803,13 @@ public function index()
     public function leaveGroup(ChatGroup $group)
     {
         $user = Auth::user();
-        
+
         if (!$group->members()->where('user_id', $user->id)->exists()) {
             return response()->json(['message' => 'You are not a member of this group'], 400);
         }
-        
+
         $group->members()->detach($user->id);
-        
+
         // Create system message if group has more than 1 member
         if ($group->members()->count() > 0) {
             $this->createSystemMessage(
@@ -693,7 +819,7 @@ public function index()
                 'member_left'
             );
         }
-        
+
         return response()->json(['message' => 'Left group successfully']);
     }
 
@@ -702,7 +828,7 @@ public function index()
 public function getMessages(ChatGroup $group)
 {
     $user = Auth::user();
-    
+
     // تحقق من صلاحية المستخدم
     if (!$group->is_public && !$group->members()->where('user_id', $user->id)->exists()) {
         return response()->json(['message' => 'Unauthorized. This is a private group.'], 403);
@@ -760,12 +886,12 @@ public function getMessages(ChatGroup $group)
 public function getMessage(ChatGroup $group, $messageId)
 {
     $user = Auth::user();
-    
+
     // Check if user is member of the group
     if (!$group->is_public && !$group->members()->where('user_id', $user->id)->exists()) {
         return response()->json(['message' => 'Unauthorized'], 403);
     }
-    
+
     // Find the message by ID and ensure it belongs to the group
     $message = Message::where('id', $messageId)
         ->where('chat_group_id', $group->id)
@@ -774,14 +900,14 @@ public function getMessage(ChatGroup $group, $messageId)
             'repliedMessage.sender:id,name'
         ])
         ->first();
-    
+
     if (!$message) {
         Log::warning("Message not found", [
             'message_id' => $messageId,
             'group_id' => $group->id,
             'user_id' => $user->id
         ]);
-        
+
         return response()->json([
             'error' => 'Message not found or deleted',
             'is_deleted' => true,
@@ -790,12 +916,12 @@ public function getMessage(ChatGroup $group, $messageId)
             'message_type' => 'text'
         ], 404);
     }
-    
+
     Log::info("Message found", [
         'message_id' => $message->id,
         'group_id' => $group->id
     ]);
-    
+
     return response()->json($message);
 }
 
@@ -804,26 +930,43 @@ public function getMessage(ChatGroup $group, $messageId)
 public function sendMessage(Request $request, ChatGroup $group)
 {
     $user = Auth::user();
-    
+
     // Check if user is member of the group and not blocked
     $member = $group->members()
         ->where('user_id', $user->id)
         ->first();
-        
+
     if (!$member || $member->pivot->is_blocked) {
         return response()->json(['message' => 'Unauthorized'], 403);
     }
-    
+
+    if ($group->chat_disabled_for_parents) {
+        // فقط المعلمين والأدمن يمكنهم النشر
+        $isTeacher = $user->user_type === 'teacher';
+        $isAdmin = $group->members()
+            ->where('user_id', $user->id)
+            ->where('is_admin', true)
+            ->exists();
+        $isModer = $user->hasBadge('moder');
+
+        if (!$isTeacher && !$isAdmin && !$isModer) {
+            return response()->json([
+                'message' => 'الدردشة معطلة لأولياء الأمور في هذه المجموعة',
+                'chat_disabled_for_parents' => true
+            ], 403);
+        }
+    }
+
     $validator = Validator::make($request->all(), [
         'content' => 'required_without:media|string',
         'media' => 'required_without:content|file|mimes:jpg,jpeg,png,gif,mp4,mov,avi,pdf,doc,docx,mp3,wav,xlsx,webm,aac,adts,m4a',
         'reply_to_message_id' => 'nullable|exists:messages,id', // إضافة التحقق من الرد
     ]);
-    
+
     if ($validator->fails()) {
         return response()->json($validator->errors(), 422);
     }
-    
+
     $messageData = [
         'sender_id' => $user->id,
         'chat_group_id' => $group->id,
@@ -831,16 +974,16 @@ public function sendMessage(Request $request, ChatGroup $group)
         'message_type' => 'text', // default to text
         'reply_to_message_id' => $request->reply_to_message_id, // إضافة الرد
     ];
-    
+
     if ($request->hasFile('media')) {
         $file = $request->file('media');
         $originalName = $file->getClientOriginalName();
         $path = $file->storeAs('chat_media', $originalName, 'public');
         $extension = strtolower($file->getClientOriginalExtension());
         $mimeType = $file->getMimeType();
-    
+
         $messageData['media_path'] = $path;
-    
+
         // Determine message type
         if (in_array($extension, ['aac', 'm4a', 'mp3', 'wav'])) {
             $messageData['message_type'] = 'audio';
@@ -852,18 +995,19 @@ public function sendMessage(Request $request, ChatGroup $group)
             $messageData['message_type'] = 'document';
         }
     }
-    
+
+
     $message = Message::create($messageData);
-    
+
     // تحميل معلومات الرسالة المردودة مع الاستجابة
     $message->load(['repliedMessage.sender']);
-    
+
     // Create message status for all members except sender
     $members = $group->members()
         ->where('user_id', '!=', $user->id)
         ->where('is_blocked', false)
         ->pluck('user_id');
-        
+
     $statuses = [];
     foreach ($members as $memberId) {
         $statuses[] = [
@@ -874,19 +1018,19 @@ public function sendMessage(Request $request, ChatGroup $group)
             'updated_at' => now(),
         ];
     }
-    
+
     if (!empty($statuses)) {
         MessageStatus::insert($statuses);
     }
-    
+
     // Notify all group members except sender
     $recipients = $group->members()
         ->where('user_id', '!=', $user->id)
         ->where('is_blocked', false)
         ->get();
-    
+
     $content = $message->content ?? $this->getMediaTypeForContent($message->message_type) ?? 'New message';
-    
+
     foreach ($recipients as $recipient) {
         // Store notification in database
         $recipient->caledonianNotifications()->create([
@@ -899,16 +1043,63 @@ public function sendMessage(Request $request, ChatGroup $group)
                 'sender_id' => $user->id,
             ],
         ]);
-        
+
         // Send FCM notification if token exists
         if ($recipient->fcm_token) {
             $recipient->notify(new NewGroupMessageNotification($message));
         }
     }
-    
+
     return response()->json($message, 201);
 }
-    
+
+
+// ✅ إضافة دالة جديدة لإدارة الخاصية
+public function toggleChatForParents(Request $request, ChatGroup $group)
+{
+    $user = Auth::user();
+
+    // Check if user is admin of the group or has moder badge
+    $isAdmin = $group->members()
+        ->where('user_id', $user->id)
+        ->where('is_admin', true)
+        ->exists();
+
+    if (!$isAdmin && !$user->hasBadge('moder')) {
+        return response()->json(['message' => 'Unauthorized'], 403);
+    }
+
+    $validator = Validator::make($request->all(), [
+        'chat_disabled_for_parents' => 'required|boolean',
+    ]);
+
+    if ($validator->fails()) {
+        return response()->json($validator->errors(), 422);
+    }
+
+    $group->update([
+        'chat_disabled_for_parents' => $request->chat_disabled_for_parents,
+    ]);
+
+    // Create system message
+    $action = $request->chat_disabled_for_parents
+        ? 'disabled chat for parents'
+        : 'enabled chat for parents';
+
+    $this->createSystemMessage(
+        $group,
+        $user,
+        "{$user->name} $action",
+        'chat_settings_changed'
+    );
+
+    return response()->json([
+        'message' => $request->chat_disabled_for_parents
+            ? 'تم تعطيل الدردشة لأولياء الأمور'
+            : 'تم تفعيل الدردشة لأولياء الأمور',
+        'chat_disabled_for_parents' => $group->chat_disabled_for_parents
+    ]);
+}
     protected function getMediaTypeForContent(string $messageType): ?string
     {
         return match($messageType) {
@@ -925,11 +1116,11 @@ public function sendMessage(Request $request, ChatGroup $group)
     {
         $tempWebmPath = $webmFile->getRealPath();
         $tempAacPath = tempnam(sys_get_temp_dir(), 'converted') . '.aac';
-        
+
         // Use ffmpeg to convert
         $ffmpegCommand = "ffmpeg -i {$tempWebmPath} -c:a aac -b:a 128k {$tempAacPath}";
         exec($ffmpegCommand, $output, $returnCode);
-        
+
         Log::info('FFmpeg conversion', [
             'command' => $ffmpegCommand,
             'output' => $output,
@@ -939,24 +1130,24 @@ public function sendMessage(Request $request, ChatGroup $group)
                 'output' => $tempAacPath
             ]
         ]);
-        
+
         if ($returnCode !== 0) {
             throw new \Exception("Failed to convert audio file: " . implode("\n", $output));
         }
-        
+
         // Generate a new filename with .aac extension
         $filename = pathinfo($webmFile->getClientOriginalName(), PATHINFO_FILENAME) . '.aac';
-        
+
         // Store the converted file with the correct extension
         $storagePath = Storage::disk('public')->putFileAs(
-            'chat_media', 
-            new File($tempAacPath), 
+            'chat_media',
+            new File($tempAacPath),
             $filename
         );
-        
+
         // Clean up temp files
         unlink($tempAacPath);
-        
+
         return $storagePath;
     }
 
@@ -964,13 +1155,13 @@ public function sendMessage(Request $request, ChatGroup $group)
     public function getPrivateMessages(User $recipient)
     {
         $user = Auth::user();
-        
+
         // Check if users have blocked each other
         if ($user->blockedUsers()->where('blocked_id', $recipient->id)->exists() ||
             $user->blockedByUsers()->where('blocker_id', $recipient->id)->exists()) {
             return response()->json(['message' => 'Messages are blocked'], 403);
         }
-        
+
         $messages = Message::where(function($query) use ($user, $recipient) {
                 $query->where('sender_id', $user->id)
                     ->where('recipient_id', $recipient->id);
@@ -984,13 +1175,13 @@ public function sendMessage(Request $request, ChatGroup $group)
             }])
             ->orderBy('created_at', 'desc')
             ->paginate(20);
-            
+
         // Mark received messages as read
         Message::where('recipient_id', $user->id)
             ->where('sender_id', $recipient->id)
             ->where('is_read', false)
             ->update(['is_read' => true, 'read_at' => now()]);
-            
+
         return response()->json($messages);
     }
 
@@ -998,35 +1189,35 @@ public function sendMessage(Request $request, ChatGroup $group)
     public function sendPrivateMessage(Request $request, User $recipient)
     {
         $user = Auth::user();
-        
+
         // Check if users have blocked each other
         if ($user->blockedUsers()->where('blocked_id', $recipient->id)->exists() ||
             $user->blockedByUsers()->where('blocker_id', $recipient->id)->exists()) {
             return response()->json(['message' => 'You cannot message this user'], 403);
         }
-        
+
         $validator = Validator::make($request->all(), [
             'content' => 'required_without:media|string',
             'media' => 'required_without:content|file|mimes:jpg,jpeg,png,gif,mp4,mov,avi,pdf,doc,docx,mp3,wav',
             'message_type' => 'sometimes|in:text,image,video,audio,document',
         ]);
-        
+
         if ($validator->fails()) {
             return response()->json($validator->errors(), 422);
         }
-        
+
         $messageData = [
             'sender_id' => $user->id,
             'recipient_id' => $recipient->id,
             'content' => $request->content,
             'message_type' => $request->message_type ?? 'text',
         ];
-        
+
         if ($request->hasFile('media')) {
             $file = $request->file('media');
             $path = $file->store('chat_media', 'public');
             $messageData['media_path'] = $path;
-            
+
             // Determine message type based on file mime type
             $mimeType = $file->getMimeType();
             if (str_starts_with($mimeType, 'image/')) {
@@ -1039,19 +1230,19 @@ public function sendMessage(Request $request, ChatGroup $group)
                 $messageData['message_type'] = 'document';
             }
         }
-        
+
         $message = Message::create($messageData);
-        
+
         // Create message status
         MessageStatus::create([
             'message_id' => $message->id,
             'user_id' => $recipient->id,
             'is_read' => false,
         ]);
-        
+
         // Broadcast event for real-time update
         broadcast(new NewPrivateMessageNotification($message))->toOthers();
-        
+
         return response()->json($message, 201);
     }
 
@@ -1059,12 +1250,12 @@ public function sendMessage(Request $request, ChatGroup $group)
     public function deleteMessage(Message $message)
     {
         $user = Auth::user();
-        
+
         // Check if user is the sender or has moder badge
         if ($message->sender_id !== $user->id && !$user->hasBadge('moder')) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
-        
+
         // Store message info for notification before deletion
         $messageData = [
             'id' => $message->id,
@@ -1072,63 +1263,63 @@ public function sendMessage(Request $request, ChatGroup $group)
             'sender_id' => $message->sender_id,
             'content' => $message->content,
         ];
-        
+
         $message->delete();
-        
+
         // Broadcast deletion event if needed
         // broadcast(new MessageDeleted($messageData))->toOthers();
-        
+
         return response()->json(['message' => 'Message deleted successfully']);
     }
-    
+
     // Get message for editing
     public function getMessageForEdit(Message $message)
     {
         $user = Auth::user();
-        
+
         // Check if user is the sender
         if ($message->sender_id !== $user->id) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
-        
+
         // Check edit time limit
         $editTimeLimit = now()->subMinutes(15);
         if ($message->created_at < $editTimeLimit) {
             return response()->json(['message' => 'Edit time limit expired'], 403);
         }
-        
+
         return response()->json($message);
     }
 
     public function updateMessage(Request $request, Message $message)
 {
     $user = Auth::user();
-    
+
     // Check if user is the sender of the message
     if ($message->sender_id !== $user->id) {
         return response()->json(['message' => 'You can only edit your own messages'], 403);
     }
-    
 
-    
+
+
     $validator = Validator::make($request->all(), [
         'content' => 'required|string|max:1000',
     ]);
-    
+
     if ($validator->fails()) {
         return response()->json($validator->errors(), 422);
     }
-    
+
     // Update message content
     $message->update([
         'content' => $request->content,
         'edited_at' => now(),
         'is_edited' => true,
     ]);
-    
+
     // Reload relationships
     $message->load(['sender:id,name,photo,last_activity', 'repliedMessage.sender:id,name']);
-    
+
     return response()->json($message);
 }
 }

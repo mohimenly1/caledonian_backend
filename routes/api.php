@@ -13,6 +13,7 @@ use App\Http\Controllers\PortalController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\FinalGradeCalculationController;
 use App\Http\Controllers\InvoiceController;
+use App\Http\Controllers\EduraStudentController;
 use App\Http\Controllers\StudentFeeController;
 use App\Http\Controllers\CommentController;
 use App\Http\Controllers\GeneratedReportCardController;
@@ -57,6 +58,7 @@ use Illuminate\Support\Facades\Route;
 use App\Exports\LogsExport;
 use App\Http\Controllers\ActivityLogController;
 use App\Http\Controllers\AttendanceController;
+use App\Http\Controllers\EduraTeacherController;
 use App\Http\Controllers\AttendanceImportController;
 use App\Http\Controllers\billsController;
 use App\Http\Controllers\AttendanceRecordController;
@@ -122,6 +124,15 @@ use App\Http\Controllers\GradesController;
 use App\Http\Controllers\TeacherDataController;
 use App\Http\Controllers\AssessmentMetadataController;
 use App\Http\Controllers\UserNotificationController;
+use App\Http\Controllers\StatsController;
+use App\Http\Controllers\ClientDashboardController;
+use App\Http\Controllers\EduraAttendanceController;
+use App\Http\Controllers\EduraTuitionController;
+use App\Http\Controllers\EduraAcademicDataController;
+use App\Http\Controllers\EduraReportCardController;
+use App\Http\Controllers\EduraParentFinanceController;
+use App\Http\Controllers\EduraChatGroupController;
+use App\Http\Controllers\SchedulePeriodController;
 
 
 
@@ -135,24 +146,24 @@ Route::get('/classes/form-data', [SchoolClassController::class, 'getFormData']);
 Route::prefix('private-conversations')->middleware('auth:sanctum')->group(function () {
     // Get or create conversation between current user and another user
     Route::post('/with/{userId}', [PrivateConversationController::class, 'getOrCreateConversation']);
-    
+
     // List user's private conversations
     Route::get('/', [PrivateConversationController::class, 'index']);
-    
+
     // Get conversation messages
     Route::get('/{conversationId}/messages', [PrivateConversationController::class, 'messages']);
-    
+
     // Send message in private conversation
     Route::post('/{conversationId}/messages', [PrivateConversationController::class, 'sendMessage']);
-    
+
     // Mark messages as read
     Route::post('/{conversationId}/mark-as-read', [PrivateConversationController::class, 'markAsRead']);
     Route::get('/unread-count', [PrivateConversationController::class, 'unreadCount']);
-    
+
     // ✅ إضافة routes جديدة للتعديل والحذف - المسار الصحيح
     Route::put('messages/{messageId}', [PrivateConversationController::class, 'updateMessage']);
     Route::delete('/messages/{messageId}', [PrivateConversationController::class, 'deleteMessage']);
-    
+
     // ✅ إضافة route للحصول على رسالة معينة للتعديل
     Route::get('messages/{messageId}/edit', [PrivateConversationController::class, 'getMessageForEdit']);
 });
@@ -188,7 +199,7 @@ Route::get('/employee-types-all', [EmployeeTypeController::class, 'EmployeeAllTy
 
 Route::get('/employees/teachers', [SalaryPerHourController::class, 'getTeachers']);
 Route::middleware('auth:sanctum')->group(function () {
-
+    Route::get('/stats', [StatsController::class, 'index']);
     Route::apiResource('posts', PostController::class);
     Route::post('posts/{post}/like', [PostController::class, 'like']);
     Route::post('posts/{post}/unlike', [PostController::class, 'unlike']);
@@ -222,13 +233,71 @@ Route::get('/parent/bus-location', [BusTrackingController::class, 'getBusLocatio
     // Route::get('/classes/{classId}/sections', [EmployeeReportController::class, 'getSectionsByClass']);
     Route::apiResource('users-controller', UserController::class);
     Route::get('/invoices/data-for-parent/{parent}', [InvoiceController::class, 'getDataForParent']);
-    Route::apiResource('/invoices', InvoiceController::class); 
+    Route::apiResource('/invoices', InvoiceController::class);
     Route::post('/payments', [PaymentController::class, 'store']);
     Route::post('/users-super', [UserController::class, 'store']);
     Route::get('/get-users-super', [UserSuperViserController::class, 'index']);
 
     Route::apiResource('/vendors', VendorController::class);
 Route::apiResource('/bills', BillController::class);
+Route::get('/edura/expense-summary', [ClientDashboardController::class, 'getExpenseSummary']);
+Route::get('/edura/bills', [ClientDashboardController::class, 'getBills']);
+   // --- ⭐⭐ إضافة مسارات الأقساط الدراسية ⭐⭐ ---
+   Route::get('/edura/tuition-summary', [EduraTuitionController::class, 'getTuitionSummary']);
+   Route::get('/edura/tuition-invoices', [EduraTuitionController::class, 'getTuitionInvoices']);
+   Route::get('/edura/income-transactions', [ClientDashboardController::class, 'getIncomeTransactions']);
+    // --- ⭐⭐ إضافة مسار المصروفات الشهرية ⭐⭐ ---
+    Route::get('/edura/monthly-expenses', [ClientDashboardController::class, 'getMonthlyExpenses']);
+    Route::get('/edura/income-report-summary', [ClientDashboardController::class, 'getIncomeReportSummary']);
+      // --- ⭐⭐ إضافة مسار تقرير الحضور ⭐⭐ ---
+      Route::get('/edura/attendance-report', [EduraAttendanceController::class, 'getDailyReport']);
+      Route::get('/edura/attendance-rate', [EduraAttendanceController::class, 'getOverallAttendanceRate']);
+      Route::get('/edura/attendance-stats', [EduraAttendanceController::class, 'getAttendanceStats']);
+      Route::get('/edura/sections-by-class', [EduraAttendanceController::class, 'getSectionsByClass']); // إضافة جديدة
+      Route::get('/edura/teachers', [EduraTeacherController::class, 'getTeachersWithAssignments']);
+      Route::get('/edura/teachers-stats', [EduraTeacherController::class, 'getTeachersStats']);
+
+         // --- ⭐⭐ إضافة مسارات البيانات الأكاديمية الأساسية ⭐⭐ ---
+    // routes/api.php - School App - تحديث ال routes
+
+Route::prefix('edura')->group(function () {
+    // إحصائيات المجموعات
+    Route::get('/chat-groups-stats', [EduraChatGroupController::class, 'getChatGroupsStats']);
+
+    // قائمة المجموعات مع الفلترة
+    Route::get('/chat-groups', [EduraChatGroupController::class, 'getChatGroups']);
+
+    // تفاصيل مجموعة محددة
+    Route::get('/chat-groups/{id}', [EduraChatGroupController::class, 'getGroupDetails']);
+
+    // رسائل مجموعة محددة
+    Route::get('/chat-groups/{id}/messages', [EduraChatGroupController::class, 'getGroupMessages']);
+
+    // إحصائيات رسائل المجموعة
+    Route::get('/chat-groups/{id}/messages-stats', [EduraChatGroupController::class, 'getGroupMessagesStats']);
+});
+    Route::prefix('edura/academic-data')->group(function () {
+        Route::get('/study-years', [EduraAcademicDataController::class, 'getStudyYears']);
+        Route::get('/grade-levels', [EduraAcademicDataController::class, 'getGradeLevels']);
+        Route::get('/subjects', [EduraAcademicDataController::class, 'getSubjects']);
+                // --- ⭐⭐ إضافة مسار جلب الفصول والشعب ⭐⭐ ---
+        Route::get('/classes', [EduraAcademicDataController::class, 'getClassesAndSections']);
+        // --- ⭐⭐ إضافة مسار جلب المواد للفصل ⭐⭐ ---
+        Route::get('/subjects-for-class', [EduraAcademicDataController::class, 'getSubjectsForClass']);
+         // --- ⭐⭐ إضافة مسار جلب الطلاب للفصل ⭐⭐ ---
+         Route::get('/students-for-class', [EduraAcademicDataController::class, 'getStudentsForClass']);
+    });
+    Route::get('/edura/parent-finance', [EduraParentFinanceController::class, 'index']);
+
+        // --- ⭐⭐ إضافة مسار بيانات الشهادة (Report Card) ⭐⭐ ---
+        Route::get('/edura/report-card-data', [EduraReportCardController::class, 'getStudentReportData']);
+
+      Route::get('/edura/students-stats', [EduraStudentController::class, 'getStudentsStats']);
+Route::get('/edura/students', [EduraStudentController::class, 'getStudentsWithDetails']);
+// طلاب Edura
+Route::get('/edura/students/{student}', [EduraStudentController::class, 'getStudentDetails']);
+Route::get('/edura/students/{student}/attendance', [EduraStudentController::class, 'getStudentAttendance']);
+Route::put('/edura/students/{student}', [EduraStudentController::class, 'updateStudent']);
 Route::apiResource('/accounts', AccountController::class); // For Chart of Accounts
 Route::apiResource('/fee-types', FeeTypeController::class);
 Route::apiResource('/fee-structures', FeeStructureController::class)->except(['show']);
@@ -349,7 +418,7 @@ Route::put('/employees/{employee}/sections', [EmployeeController::class, 'syncSe
     Route::get('/classes/{classId}/sections/{sectionId}/subjects', [AssignSubjectsAndClassesAndSectionsToTeachersController::class, 'getClassSectionSubjects']);
     Route::post('/assign-subjects', [AssignSubjectsAndClassesAndSectionsToTeachersController::class, 'assignSubjects']);
     Route::delete('/assign-subjects/{id}', [AssignSubjectsAndClassesAndSectionsToTeachersController::class, 'removeAssignment']);
-    
+
     // You can also keep the existing routes if needed for backward compatibility
     Route::get('/teacher-subjects', [AssignSubjectsAndClassesAndSectionsToTeachersController::class, 'getTeacherSubjects']);
 
@@ -441,7 +510,8 @@ Route::post('/chat-groups/{group}/join', [ChatController::class, 'joinGroup']);
 Route::post('/chat-groups/{group}/leave', [ChatController::class, 'leaveGroup']);
 Route::post('/announcements/send', [AnnouncementController::class, 'send']);
 // Messages
-
+Route::apiResource('schedule-periods', SchedulePeriodController::class);
+Route::post('schedule-periods/sync', [SchedulePeriodController::class, 'sync']);
 Route::post('/notifications/send-to-user', [UserNotificationController::class, 'sendToUser']);
 
 Route::get('/chat-groups/{group}/messages', [ChatController::class, 'getMessages']);
@@ -451,7 +521,7 @@ Route::put('/messages/{message}', [ChatController::class, 'updateMessage']); // 
 Route::delete('/messages/{message}', [ChatController::class, 'deleteMessage']); // حذف الرسالة
 Route::get('/messages/{message}/edit', [ChatController::class, 'getMessageForEdit']); // جلب الرسالة للتعديل
 Route::post('/chat-groups/{group}/mark-as-read', [ChatController::class, 'markAsRead']);
-
+Route::post('/chat-groups/{group}/toggle-chat-for-parents', [ChatController::class, 'toggleChatForParents']);
 
 
 Route::post('/parent-arrivals/scan', [ParentArrivalController::class, 'processParentQrCode']);
@@ -496,12 +566,12 @@ Route::get('/users/filter', [ChatController::class, 'filterUsers']);
     Route::put('/employees/{id}/update-salary', [EmployeeController::class, 'updateEmployeeSalary']);
     Route::get('/employees', [EmployeeController::class, 'index']);
 
-    
+
     Route::get('/notifications', [App\Http\Controllers\Api\UserController::class, 'getNotifications']);
     Route::post('/notifications/{id}/read', [App\Http\Controllers\Api\UserController::class, 'markNotificationAsRead']);
     Route::post('/notifications/read-all', [App\Http\Controllers\Api\UserController::class, 'markAllNotificationsAsRead']);
 
-    
+
     Route::get('/employees-issued-salaries', [EmployeeController::class, 'indexForIssuedSalaries']);
     Route::get('/employees-absences-deductions', [EmployeeController::class, 'indexForabsenceAndDeduction']);
     Route::get('/employees/{id}', [EmployeeController::class, 'show']);
@@ -536,19 +606,19 @@ Route::get('/users/filter', [ChatController::class, 'filterUsers']);
     Route::prefix('timetable')->group(function () {
         // Get timetable (class/section based)
         Route::get('/', [TimetableController::class, 'index']);
-        
+
         // Create timetable entries
         Route::post('/', [TimetableController::class, 'store']);
-        
+
         // Update timetable entry
         Route::put('/{timetable}', [TimetableController::class, 'update']);
-        
+
         // Delete timetable entry
         Route::delete('/{timetable}', [TimetableController::class, 'destroy']);
     });
 
     Route::get('/student/profile', [StudentController::class, 'getProfile']);
-    
+
     // Get class subjects
     Route::get('/class-subjects-students', [ClassSubjectController::class, 'getClassSubjects']);
 
@@ -559,16 +629,16 @@ Route::get('/users/filter', [ChatController::class, 'filterUsers']);
     Route::post('/financial-documents/{id}/confirm-delete', [FinancialDocumentController::class, 'confirmDeletion']);
 
     Route::get('/student/subject/{subjectId}/details', [StudentSubjectController::class, 'getSubjectDetails']);
-    
+
     // Grades by term
     Route::get('/student/subject/{subjectId}/grades', [StudentSubjectController::class, 'getSubjectGrades']);
-    
+
     // Progress tracking
     Route::get('/student/subject/{subjectId}/progress', [StudentSubjectController::class, 'getSubjectProgress']);
-    
+
     // Evaluations (both manual and grade-based)
     Route::get('/student/subject/{subjectId}/evaluations', [StudentSubjectController::class, 'getSubjectEvaluations']);
-    
+
     // Exams
     Route::get('/student/subject/{subjectId}/exams', [StudentSubjectController::class, 'getSubjectExams']);
     Route::get('/filter-users', [UserFilterController::class, 'filterUsers']);
@@ -642,15 +712,15 @@ Route::get('/assessment-metadata', [AssessmentMetadataController::class, 'index'
     //     $request->validate([
     //         'fcm_token' => 'required|string',
     //     ]);
-    
+
     //     $user = Auth::user();
     //     if (!$user) {
     //         return response()->json(['message' => 'Unauthorized'], 401);
     //     }
-    
+
     //     $user->fcm_token = $request->fcm_token;
     //     $user->save();
-    
+
     //     return response()->json(['message' => 'FCM token updated successfully']);
     // })->middleware('auth:sanctum');
     Route::apiResource('parent-wallets', ParentWalletController::class);
@@ -658,7 +728,7 @@ Route::get('/assessment-metadata', [AssessmentMetadataController::class, 'index'
     Route::get('/parent-wallets/{wallet}/transactions', [ParentWalletController::class, 'getTransactions']);
     Route::get('/targeted-notifications/parents', [\App\Http\Controllers\TargetedNotificationController::class, 'getParentList']);
     Route::post('/targeted-notifications/send', [\App\Http\Controllers\TargetedNotificationController::class, 'send']);
-    
+
     //
     Route::post('/parent-wallets/{wallet}/add-funds', [ParentWalletController::class, 'addFunds']);
 
@@ -675,13 +745,13 @@ Route::get('/assessment-metadata', [AssessmentMetadataController::class, 'index'
     Route::get('/student-attendance/{studentId}', function($studentId) {
         $month = request()->input('month', now()->month);
         $year = request()->input('year', now()->year);
-        
+
         $records = StudentAttendanceRecord::where('student_id', $studentId)
             ->whereMonth('created_at', $month)
             ->whereYear('created_at', $year)
             ->orderBy('created_at', 'desc')
             ->get();
-            
+
         return response()->json([
             'success' => true,
             'attendance' => $records
@@ -809,7 +879,7 @@ Route::post('/update-activity', function(Request $request) {
     $user = $request->user();
     $user->last_activity = now();
     $user->save();
-    
+
     return response()->json([
         'success' => true,
         'last_activity' => $user->last_activity,

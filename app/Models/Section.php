@@ -23,6 +23,12 @@ class Section extends Model
     }
 
 
+      // إضافة العلاقة المفقودة
+      public function students()
+      {
+          return $this->hasMany(Student::class, 'section_id');
+      }
+  
     public function employees()
     {
         return $this->belongsToMany(Employee::class, 'employee_section', 'section_id', 'employee_id');

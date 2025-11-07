@@ -32,8 +32,50 @@ class Invoice extends Model
         return $this->hasMany(InvoiceItem::class);
     }
 
+    public function invoiceItems()
+    {
+        return $this->hasMany(InvoiceItem::class, 'invoice_id');
+    }
+
     public function payments()
     {
         return $this->morphMany(Transaction::class, 'related');
+    }
+
+    // ⭐ دالة جديدة لحساب المبلغ المدفوع
+    public function getPaidAmountAttribute()
+    {
+        return $this->payments()
+            ->where('type', 'income')
+            ->sum('amount');
+    }
+
+    // ⭐ دالة جديدة لحساب المبلغ المتبقي
+    public function getRemainingAmountAttribute()
+    {
+        return $this->final_amount - $this->paid_amount;
+    }
+
+    // ⭐ دالة جديدة لتحديد الحالة
+    public function getStatusAttribute($value)
+    {
+        // إذا كانت هناك قيمة مخزنة، نستخدمها
+        if ($value) {
+            return $value;
+        }
+        
+        // وإلا نحسب الحالة بناءً على المدفوعات
+        $paidAmount = $this->paid_amount;
+        $finalAmount = $this->final_amount;
+        
+        if ($finalAmount == 0) {
+            return 'paid';
+        } elseif ($paidAmount <= 0) {
+            return 'unpaid';
+        } elseif ($paidAmount >= $finalAmount) {
+            return 'paid';
+        } else {
+            return 'partially_paid';
+        }
     }
 }

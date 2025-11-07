@@ -31,6 +31,15 @@ class ParentInfo extends Model
         'discount', // Add this line
     ];
 
+
+        // ⭐ إضافة accessor للحصول على الاسم الكامل
+        public function getNameAttribute()
+        {
+            return trim($this->first_name . ' ' . $this->last_name);
+        }
+    
+        // ⭐ إضافة هذا السطر لجعل الاسم متاحاً في الاستعلامات
+        protected $appends = ['name'];
     public function user()
     {
         return $this->belongsTo(User::class);

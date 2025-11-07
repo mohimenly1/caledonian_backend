@@ -11,7 +11,7 @@ class Message extends Model
     use HasFactory, SoftDeletes;
 
     protected $fillable = [
-        'sender_id', 'recipient_id', 'chat_group_id', 'content', 
+        'sender_id', 'recipient_id', 'chat_group_id', 'content',
         'message_type', 'media_path', 'is_read', 'read_at',
         'private_conversation_id', // Add this
         'is_system_message', // add this
@@ -33,7 +33,7 @@ class Message extends Model
     ];
 
 
-    
+
     public function sender()
     {
         return $this->belongsTo(User::class, 'sender_id');
@@ -71,8 +71,8 @@ public function replies()
 
 public function getConversationAttribute()
 {
-    return $this->chat_group_id 
-        ? $this->group 
+    return $this->chat_group_id
+        ? $this->group
         : $this->privateConversation;
 }
 
@@ -85,17 +85,19 @@ public function getIsEditedAttribute($value)
 {
     return (bool) $value; // تحويل null إلى false
 }
+
+
 public function getRecipientAttribute()
 {
     if ($this->chat_group_id) {
         return $this->group;
     }
-    
+
     // For private conversations, the recipient is the other user
     if ($this->private_conversation_id) {
         return $this->privateConversation->otherUser($this->sender);
     }
-    
+
     return null;
 }
 }
