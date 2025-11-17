@@ -38,7 +38,7 @@ class InvoiceController extends Controller
         }
 
         $invoices = $query->paginate($request->input('per_page', 15));
-        
+
         // Add remaining_amount to each invoice
         $invoices->getCollection()->transform(function ($invoice) {
             $invoice->paid_amount = $invoice->paid_amount ?? 0;
@@ -67,7 +67,7 @@ class InvoiceController extends Controller
             'treasury_id' => 'required|exists:treasuries,id',
             'amount_paid' => 'required|numeric|min:0',
         ]);
-        
+
         $parent = ParentInfo::findOrFail($validatedData['parent_id']);
         $studyYearId = $validatedData['study_year_id'];
         $totalAmount = 0;
@@ -93,17 +93,17 @@ class InvoiceController extends Controller
         $discount = 0;
         if ($request->filled('manual_discount') && $validatedData['manual_discount'] > 0) {
             $discount = $validatedData['manual_discount'];
-        } 
+        }
         elseif (($validatedData['apply_sibling_discount'] ?? false) && count($validatedData['students']) > 1) {
             $discountPolicy = SiblingDiscount::where('study_year_id', $studyYearId)
                                              ->where('number_of_siblings', count($validatedData['students']))
                                              ->first();
-            
+
             if ($discountPolicy) {
                 $discount = ($totalAmount * $discountPolicy->discount_percentage) / 100;
             }
         }
-        
+
         $finalAmount = $totalAmount - $discount;
 
         if ($validatedData['amount_paid'] > $finalAmount) {
@@ -150,12 +150,13 @@ class InvoiceController extends Controller
                 $treasury->save();
 
                 // تحديث حالة الفاتورة
+                $invoiceStatus = 'unpaid';
                 if ($validatedData['amount_paid'] >= $finalAmount) {
-                    $invoice->status = 'paid';
-                } else {
-                    $invoice->status = 'partially_paid';
+                    $invoiceStatus = 'paid';
+                } elseif ($validatedData['amount_paid'] > 0) {
+                    $invoiceStatus = 'partially_paid';
                 }
-                $invoice->save();
+                $invoice->update(['status' => $invoiceStatus]);
             }
 
             DB::commit();
@@ -182,12 +183,41 @@ class InvoiceController extends Controller
             'payments.treasury:id,name'
         ]);
 
-        // --- التعديل الرئيسي هنا ---
-        $paidAmount = $invoice->payments->sum('amount');
-        $invoice->paid_amount = $paidAmount;
-        $invoice->remaining_amount = $invoice->final_amount - $paidAmount;
+        // حساب المبلغ المدفوع والمتبقي
+        $paidAmount = $invoice->payments()
+            ->where('type', 'income')
+            ->sum('amount');
 
-        return response()->json($invoice);
+        $remainingAmount = $invoice->final_amount - $paidAmount;
+
+        // تحديد الحالة بناءً على المبلغ المدفوع
+        $invoiceStatus = 'unpaid';
+        if ($paidAmount >= $invoice->final_amount && $invoice->final_amount > 0) {
+            $invoiceStatus = 'paid';
+        } elseif ($paidAmount > 0 && $paidAmount < $invoice->final_amount) {
+            $invoiceStatus = 'partially_paid';
+        } elseif ($paidAmount <= 0 && $invoice->final_amount > 0) {
+            $invoiceStatus = 'unpaid';
+        } else {
+            $invoiceStatus = 'paid';
+        }
+
+        // إضافة الحقول المحسوبة إلى الاستجابة
+        $invoiceArray = $invoice->toArray();
+        $invoiceArray['paid_amount'] = $paidAmount;
+        $invoiceArray['remaining_amount'] = $remainingAmount;
+        $invoiceArray['status'] = $invoiceStatus;
+        $invoiceArray['payments'] = $invoice->payments->map(function ($payment) {
+            return [
+                'id' => $payment->id,
+                'amount' => $payment->amount,
+                'payment_date' => $payment->payment_date->format('Y-m-d'),
+                'treasury_name' => $payment->treasury->name ?? null,
+                'description' => $payment->description,
+            ];
+        });
+
+        return response()->json($invoiceArray);
     }
 
 
@@ -196,14 +226,145 @@ class InvoiceController extends Controller
      */
     public function destroy(Invoice $invoice)
     {
-        // Add logic to prevent deletion if there are payments, or handle refunds
-        if ($invoice->payments()->exists()) {
-            return response()->json(['message' => 'Cannot delete an invoice that has payments.'], 422);
+        try {
+            // التحقق من وجود مدفوعات من نوع income فقط
+            $hasPayments = $invoice->payments()
+                ->where('type', 'income')
+                ->exists();
+
+            if ($hasPayments) {
+                return response()->json([
+                    'message' => 'لا يمكن حذف الفاتورة التي تحتوي على مدفوعات.',
+                    'error' => 'invoice_has_payments'
+                ], 422);
+            }
+
+            // حفظ معلومات الفاتورة قبل الحذف
+            $invoiceId = $invoice->id;
+            $invoiceNumber = $invoice->invoice_number;
+
+            // حذف بنود الفاتورة أولاً (إذا كانت موجودة)
+            if ($invoice->items()->exists()) {
+                $invoice->items()->delete();
+            }
+
+            // حذف الفاتورة
+            $invoice->delete();
+
+            return response()->json([
+                'message' => 'تم حذف الفاتورة بنجاح.',
+                'invoice_id' => $invoiceId,
+                'invoice_number' => $invoiceNumber,
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'حدث خطأ أثناء حذف الفاتورة.',
+                'error' => $e->getMessage()
+            ], 500);
         }
-        
-        $invoice->delete();
-        
-        return response()->json(['message' => 'Invoice deleted successfully.']);
+    }
+
+    /**
+     * ⭐⭐ إضافة دفعة جديدة للفاتورة ⭐⭐
+     * POST /api/invoices/{invoice}/payments
+     */
+    public function addPayment(Request $request, Invoice $invoice)
+    {
+        $validatedData = $request->validate([
+            'treasury_id' => 'required|exists:treasuries,id',
+            'amount' => 'required|numeric|min:0.01',
+            'payment_date' => 'required|date',
+            'payment_method' => 'nullable|string|in:cash,check,bank_transfer',
+            'description' => 'nullable|string',
+        ]);
+
+        $treasury = Treasury::findOrFail($validatedData['treasury_id']);
+
+        // حساب المبلغ المدفوع حالياً
+        $totalPaid = $invoice->payments()
+            ->where('type', 'income')
+            ->sum('amount');
+        $remainingAmount = $invoice->final_amount - $totalPaid;
+
+        // التحقق من أن المبلغ لا يتجاوز المتبقي
+        if ($validatedData['amount'] > $remainingAmount) {
+            return response()->json([
+                'message' => 'المبلغ المدفوع لا يمكن أن يتجاوز المبلغ المتبقي.',
+                'remaining_amount' => $remainingAmount
+            ], 422);
+        }
+
+        try {
+            DB::beginTransaction();
+
+            // 1. إنشاء حركة مالية جديدة
+            $invoice->payments()->create([
+                'treasury_id' => $treasury->id,
+                'payment_date' => $validatedData['payment_date'],
+                'amount' => $validatedData['amount'],
+                'type' => 'income',
+                'payment_method' => $validatedData['payment_method'] ?? 'cash',
+                'description' => $validatedData['description'] ?? 'دفعة إضافية للفاتورة #' . $invoice->invoice_number,
+            ]);
+
+            // 2. تحديث رصيد الخزينة
+            $treasury->balance += $validatedData['amount'];
+            $treasury->save();
+
+            // 3. تحديث حالة الفاتورة
+            $newTotalPaid = $totalPaid + $validatedData['amount'];
+            $invoiceStatus = 'unpaid';
+            if ($newTotalPaid >= $invoice->final_amount) {
+                $invoiceStatus = 'paid';
+            } elseif ($newTotalPaid > 0) {
+                $invoiceStatus = 'partially_paid';
+            }
+            // تحديث status مباشرة
+            $invoice->fill(['status' => $invoiceStatus]);
+            $invoice->save();
+
+            DB::commit();
+
+            // إعادة تحميل الفاتورة مع العلاقات
+            $invoice->load([
+                'items.student:id,name',
+                'items.feeStructure.feeType:id,name',
+                'payments.treasury:id,name'
+            ]);
+
+            // حساب المبلغ المدفوع مرة أخرى بعد الحفظ
+            $paidAmount = $invoice->payments()
+                ->where('type', 'income')
+                ->sum('amount');
+
+            // إرجاع بيانات الفاتورة المحدثة مع العلاقات
+            $invoiceArray = $invoice->toArray();
+            $invoiceArray['paid_amount'] = $paidAmount;
+            $invoiceArray['remaining_amount'] = $invoice->final_amount - $paidAmount;
+            $invoiceArray['status'] = $invoiceStatus;
+            $invoiceArray['payments'] = $invoice->payments->map(function ($payment) {
+                return [
+                    'id' => $payment->id,
+                    'amount' => $payment->amount,
+                    'payment_date' => $payment->payment_date->format('Y-m-d'),
+                    'treasury_name' => $payment->treasury->name ?? null,
+                    'description' => $payment->description,
+                ];
+            });
+
+            return response()->json([
+                'message' => 'تم تسجيل الدفعة بنجاح.',
+                'invoice' => $invoiceArray,
+                'new_treasury_balance' => $treasury->balance,
+            ], 201);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'message' => 'حدث خطأ أثناء تسجيل الدفعة.',
+                'error' => $e->getMessage()
+            ], 500);
+        }
     }
 
       /**
@@ -213,8 +374,8 @@ class InvoiceController extends Controller
      */
     public function getDataForParent(ParentInfo $parent)
     {
-        $parent->load(['students.class', 'students.studyYear']);
-        
+        $parent->load(['students.class', 'students.studyYear', 'students.section']);
+
         $students = $parent->students;
         if ($students->isEmpty()) {
             return response()->json(['message' => 'This parent has no students enrolled.'], 404);
@@ -238,11 +399,75 @@ class InvoiceController extends Controller
                                              ->first();
         }
 
+        // 4. ⭐⭐ جلب الفواتير الحالية لولي الأمر ⭐⭐
+        $invoices = Invoice::where('parent_id', $parent->id)
+            ->with([
+                'items.student:id,name',
+                'items.feeStructure.feeType:id,name',
+                'payments.treasury:id,name'
+            ])
+            ->withSum(['payments as paid_amount' => function ($query) {
+                $query->where('type', 'income');
+            }], 'amount')
+            ->orderBy('issue_date', 'desc')
+            ->get()
+            ->map(function ($invoice) {
+                $paidAmount = $invoice->paid_amount ?? 0;
+                $remainingAmount = $invoice->final_amount - $paidAmount;
+
+                // تحديد الحالة بناءً على المبلغ المدفوع
+                $invoiceStatus = 'unpaid';
+                if ($paidAmount >= $invoice->final_amount && $invoice->final_amount > 0) {
+                    $invoiceStatus = 'paid';
+                } elseif ($paidAmount > 0 && $paidAmount < $invoice->final_amount) {
+                    $invoiceStatus = 'partially_paid';
+                } elseif ($paidAmount <= 0 && $invoice->final_amount > 0) {
+                    $invoiceStatus = 'unpaid';
+                } else {
+                    $invoiceStatus = 'paid'; // للفواتير ذات القيمة الصفرية
+                }
+
+                return [
+                    'id' => $invoice->id,
+                    'invoice_number' => $invoice->invoice_number,
+                    'issue_date' => $invoice->issue_date->format('Y-m-d'),
+                    'due_date' => $invoice->due_date->format('Y-m-d'),
+                    'total_amount' => $invoice->total_amount,
+                    'discount' => $invoice->discount,
+                    'final_amount' => $invoice->final_amount,
+                    'paid_amount' => $paidAmount,
+                    'remaining_amount' => $remainingAmount,
+                    'status' => $invoiceStatus,
+                    'study_year_id' => $invoice->study_year_id,
+                    'items' => $invoice->items->map(function ($item) {
+                        return [
+                            'id' => $item->id,
+                            'student_id' => $item->student_id,
+                            'student_name' => $item->student->name ?? null,
+                            'fee_structure_id' => $item->fee_structure_id,
+                            'fee_type_name' => $item->feeStructure->feeType->name ?? null,
+                            'description' => $item->description,
+                            'amount' => $item->amount,
+                        ];
+                    }),
+                    'payments' => $invoice->payments->map(function ($payment) {
+                        return [
+                            'id' => $payment->id,
+                            'amount' => $payment->amount,
+                            'payment_date' => $payment->payment_date->format('Y-m-d'),
+                            'treasury_name' => $payment->treasury->name ?? null,
+                            'description' => $payment->description,
+                        ];
+                    }),
+                ];
+            });
+
         return response()->json([
             'parent' => $parent,
             'students' => $students,
             'feeStructures' => $feeStructures, // Now contains fees for ALL children
             'siblingDiscountPolicy' => $discountPolicy,
+            'invoices' => $invoices, // ⭐⭐ الفواتير الحالية ⭐⭐
         ]);
     }
 }

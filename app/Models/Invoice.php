@@ -10,7 +10,7 @@ class Invoice extends Model
     use HasFactory;
 
     protected $fillable = [
-        'parent_id', 'study_year_id', 'invoice_number', 'issue_date', 
+        'parent_id', 'study_year_id', 'invoice_number', 'issue_date',
         'due_date', 'total_amount', 'discount', 'final_amount', 'status'
     ];
 
@@ -42,7 +42,7 @@ class Invoice extends Model
         return $this->morphMany(Transaction::class, 'related');
     }
 
-    // ⭐ دالة جديدة لحساب المبلغ المدفوع
+    // ⭐ دالة جديدة لحساب المبلغ المدفوع (computed attribute)
     public function getPaidAmountAttribute()
     {
         return $this->payments()
@@ -50,32 +50,9 @@ class Invoice extends Model
             ->sum('amount');
     }
 
-    // ⭐ دالة جديدة لحساب المبلغ المتبقي
+    // ⭐ دالة جديدة لحساب المبلغ المتبقي (computed attribute)
     public function getRemainingAmountAttribute()
     {
         return $this->final_amount - $this->paid_amount;
-    }
-
-    // ⭐ دالة جديدة لتحديد الحالة
-    public function getStatusAttribute($value)
-    {
-        // إذا كانت هناك قيمة مخزنة، نستخدمها
-        if ($value) {
-            return $value;
-        }
-        
-        // وإلا نحسب الحالة بناءً على المدفوعات
-        $paidAmount = $this->paid_amount;
-        $finalAmount = $this->final_amount;
-        
-        if ($finalAmount == 0) {
-            return 'paid';
-        } elseif ($paidAmount <= 0) {
-            return 'unpaid';
-        } elseif ($paidAmount >= $finalAmount) {
-            return 'paid';
-        } else {
-            return 'partially_paid';
-        }
     }
 }

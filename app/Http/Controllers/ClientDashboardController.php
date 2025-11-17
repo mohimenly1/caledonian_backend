@@ -28,8 +28,17 @@ class ClientDashboardController extends Controller
             ->whereMonth('payment_date', $currentMonth)
             ->sum('amount');
 
-        // حساب عدد فواتير الموردين غير المدفوعة أو المدفوعة جزئياً
-        $pendingPaymentsCount = Bill::whereIn('status', ['unpaid', 'partially_paid'])->count();
+        // حساب عدد فواتير الموردين غير المدفوعة أو المدفوعة جزئياً ومجموع المتبقي
+        $pendingBillsQuery = Bill::withSum(['payments as paid_amount' => function ($query) {
+            $query->where('type', 'expense');
+        }], 'amount')
+            ->whereIn('status', ['unpaid', 'partially_paid']);
+
+        $pendingPaymentsCount = (clone $pendingBillsQuery)->count();
+        $pendingPaymentsAmount = (clone $pendingBillsQuery)->get()->sum(function ($bill) {
+            $paid = $bill->paid_amount ?? 0;
+            return max(($bill->total_amount ?? 0) - $paid, 0);
+        });
 
         // حساب الرصيد الكلي
         $totalBalance = Treasury::sum('balance');
@@ -49,6 +58,7 @@ class ClientDashboardController extends Controller
         return response()->json([
             'monthly_expenses' => $monthlyExpenses,
             'pending_payments_count' => $pendingPaymentsCount,
+            'pending_payments_amount' => $pendingPaymentsAmount,
             'total_balance' => $totalBalance,
             'recent_current_month_expenses' => $recentCurrentMonthExpenses,
             'current_month_name' => $now->translatedFormat('F Y'), // اسم الشهر الحالي
@@ -173,12 +183,12 @@ class ClientDashboardController extends Controller
               $billsIssuedInMonth->getCollection()->transform(function ($bill) {
                   // استخدام paid_amount المباشر من الفاتورة
                   $calculated_paid_amount = $bill->paid_amount ?? 0;
-                  
+
                   // ⭐ سطر محذوف (كان مكرراً)
-                  // $bill->paid_amount = $calculated_paid_amount; 
-                  
+                  // $bill->paid_amount = $calculated_paid_amount;
+
                   $bill->remaining_amount = $bill->total_amount - $calculated_paid_amount;
-                  
+
                   // تحديث الحالة
                    $newStatus = 'paid'; // Default
                    if ($calculated_paid_amount <= 0 && $bill->total_amount > 0) { $newStatus = 'unpaid'; }
@@ -232,7 +242,7 @@ class ClientDashboardController extends Controller
         if (!$relatedType) {
             return 'إيداع يدوي';
         }
-        
+
         switch ($relatedType) {
             case 'App\\Models\\Invoice':
                 return 'فاتورة قسط دراسي';
@@ -256,7 +266,7 @@ class ClientDashboardController extends Controller
         // تحديد بداية الأسبوع ونهايته (نفترض أن الأسبوع يبدأ السبت)
         $startOfWeek = $now->copy()->startOfWeek(Carbon::SATURDAY);
         $endOfWeek = $now->copy()->endOfWeek(Carbon::FRIDAY);
-        
+
         // 1. إجمالي الدخل هذا الأسبوع
         $totalIncomeThisWeek = Transaction::where('type', 'income')
             ->whereBetween('payment_date', [$startOfWeek, $endOfWeek])
@@ -299,7 +309,7 @@ class ClientDashboardController extends Controller
                 $days[$date]['total'] = (float) $data->total;
             }
         }
-        
+
         $income_by_day = array_values($days); // إرسال مصفوفة مرتبة
 
         return response()->json([
