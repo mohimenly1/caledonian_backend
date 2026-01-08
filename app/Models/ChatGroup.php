@@ -51,6 +51,7 @@ public function messages()
 
 protected $casts = [
     'is_public' => 'boolean',
+    'chat_disabled_for_parents' => 'boolean',
     // Add other casts if needed
 ];
 }

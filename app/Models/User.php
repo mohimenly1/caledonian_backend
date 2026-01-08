@@ -257,6 +257,12 @@ public function hasBadge($badgeName)
 // Add this method to handle notifications
 public function routeNotificationForFcm()
 {
+    \Illuminate\Support\Facades\Log::info('[User@routeNotificationForFcm] 🔍 Getting FCM token for user', [
+        'user_id' => $this->id,
+        'has_fcm_token' => !empty($this->fcm_token),
+        'fcm_token_preview' => $this->fcm_token ? substr($this->fcm_token, 0, 50) . '...' : 'NULL',
+    ]);
+    
     return $this->fcm_token;
 }
 

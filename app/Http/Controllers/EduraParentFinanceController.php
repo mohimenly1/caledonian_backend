@@ -47,7 +47,7 @@ public function index(Request $request)
     // تطبيق نفس شروط الفلترة على الإحصائيات
     if ($request->filled('status') && $request->status !== 'all') {
         $status = $request->status;
-        
+
         if ($status === 'no_invoices') {
             $statsQuery->whereDoesntHave('invoices');
         } else {
@@ -88,7 +88,7 @@ public function index(Request $request)
 
     // حساب الإحصائيات الكلية
     $allParents = $statsQuery->get();
-    
+
     $totalStats = [
         'total_invoiced' => 0,
         'total_paid' => 0,
@@ -108,12 +108,12 @@ public function index(Request $request)
             return $invoice->payments->where('type', 'income')->sum('amount');
         });
         $parentRemaining = $parentInvoiced - $parentPaid;
-        
+
         // ⭐ حساب الإحصائيات المالية
         $totalStats['total_invoiced'] += $parentInvoiced;
         $totalStats['total_paid'] += $parentPaid;
         $totalStats['total_remaining'] += $parentRemaining;
-        
+
         // حساب إحصائيات الحالات
         if ($parent->invoices->count() === 0) {
             $paymentStatusStats['no_invoices']++;
@@ -131,9 +131,10 @@ public function index(Request $request)
 
     // استعلام للبيانات المعروضة (مع Pagination)
     $displayQuery = ParentInfo::query()
-        ->select('id', 'first_name', 'last_name', 'email', 'phone_number_one')
+        ->select('id', 'user_id', 'first_name', 'last_name', 'email', 'phone_number_one')
         ->with([
-            'students:id,name,parent_id,class_id', 
+            'user:id,email,phone', // ✅ إضافة علاقة User للحصول على user_id
+            'students:id,name,parent_id,class_id',
             'students.class:id,name',
             'invoices' => function ($query) {
                 $query->select('id', 'parent_id', 'invoice_number', 'issue_date', 'due_date', 'final_amount', 'status')
@@ -164,7 +165,7 @@ public function index(Request $request)
     // تطبيق نفس شروط الفلترة على البيانات المعروضة
     if ($request->filled('status') && $request->status !== 'all') {
         $status = $request->status;
-        
+
         if ($status === 'no_invoices') {
             $displayQuery->whereDoesntHave('invoices');
         } else {
@@ -207,30 +208,30 @@ public function index(Request $request)
 
     // حساب المبالغ المتبقية وتحديث الحالة للبيانات المعروضة
     $parents->getCollection()->transform(function ($parent) {
-        
+
         // حساب الإجماليات لولي الأمر
         $parent->total_invoiced = $parent->invoices->sum('final_amount');
         $parent->total_paid = $parent->invoices->sum(function($invoice) {
             return $invoice->payments->where('type', 'income')->sum('amount');
         });
         $parent->total_remaining = $parent->total_invoiced - $parent->total_paid;
-        
+
         // حساب حالة كل فاتورة على حدة
         $parent->invoices->transform(function ($invoice) {
             $invoice->paid_amount = $invoice->payments->where('type', 'income')->sum('amount');
             $invoice->remaining_amount = $invoice->final_amount - $invoice->paid_amount;
-            
+
             // تحديث حالة الفاتورة بناءً على المدفوعات
-            if ($invoice->paid_amount <= 0 && $invoice->final_amount > 0) { 
-                $invoice->status = 'unpaid'; 
-            } elseif ($invoice->paid_amount < $invoice->final_amount && $invoice->paid_amount > 0) { 
-                $invoice->status = 'partially_paid'; 
-            } elseif ($invoice->paid_amount >= $invoice->final_amount) { 
-                $invoice->status = 'paid'; 
-            } else { 
-                $invoice->status = 'paid'; 
+            if ($invoice->paid_amount <= 0 && $invoice->final_amount > 0) {
+                $invoice->status = 'unpaid';
+            } elseif ($invoice->paid_amount < $invoice->final_amount && $invoice->paid_amount > 0) {
+                $invoice->status = 'partially_paid';
+            } elseif ($invoice->paid_amount >= $invoice->final_amount) {
+                $invoice->status = 'paid';
+            } else {
+                $invoice->status = 'paid';
             }
-            
+
             // تحسين بيانات عناصر الفاتورة
             if ($invoice->relationLoaded('invoiceItems')) {
                 $invoice->invoice_items = $invoice->invoiceItems->map(function ($item) {
@@ -246,18 +247,36 @@ public function index(Request $request)
             } else {
                 $invoice->invoice_items = [];
             }
-            
+
             // إزالة العلاقات الأصلية لتقليل حجم البيانات
             unset($invoice->invoiceItems);
             unset($invoice->payments);
             unset($invoice->relationships);
-            
+
             return $invoice->only([
-                'id', 'invoice_number', 'issue_date', 'due_date', 
-                'final_amount', 'paid_amount', 'remaining_amount', 
+                'id', 'invoice_number', 'issue_date', 'due_date',
+                'final_amount', 'paid_amount', 'remaining_amount',
                 'status', 'invoice_items'
             ]);
         });
+
+        // ✅ إضافة user_id إلى البيانات المرجعة
+        // التأكد من وجود user_id (من parentInfo مباشرة أو من علاقة user)
+        $parentUserId = $parent->user_id ?? ($parent->user->id ?? null);
+
+        // ✅ تسجيل user_id للتحقق
+        Log::debug('[EduraParentFinanceController] Setting user_id for parent', [
+            'parent_id' => $parent->id,
+            'user_id_from_parent' => $parent->user_id,
+            'user_id_from_relation' => $parent->user->id ?? null,
+            'final_user_id' => $parentUserId,
+        ]);
+
+        // ✅ إضافة user_id إلى attributes لجعله جزءاً من البيانات المرجعة
+        $parent->setAttribute('user_id', $parentUserId);
+
+        // ✅ جعل user_id مرئياً في toArray()
+        $parent->makeVisible(['user_id']);
 
         return $parent;
     });

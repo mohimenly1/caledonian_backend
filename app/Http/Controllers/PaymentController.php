@@ -103,16 +103,38 @@ class PaymentController extends Controller
     $bill = Bill::findOrFail($validatedData['bill_id']);
     $treasury = Treasury::findOrFail($validatedData['treasury_id']);
     
-    // Check if the bill is already fully paid
-    if ($bill->status === 'paid') {
-        return response()->json(['message' => 'This bill has already been fully paid.'], 422);
-    }
+    // ✅ حساب المبلغ المدفوع والمتبقي الفعلي
+    $totalPaid = (float) $bill->payments()->sum('amount');
+    $totalAmount = (float) $bill->total_amount;
+    $remainingAmount = $totalAmount - $totalPaid;
     
-    $totalPaid = $bill->payments()->sum('amount');
-    $remainingAmount = $bill->total_amount - $totalPaid;
+    // ✅ Logging للتحقق من القيم
+    \Log::info('[PaymentController::storeBillPayment] Payment validation', [
+        'bill_id' => $bill->id,
+        'total_amount' => $totalAmount,
+        'total_paid' => $totalPaid,
+        'remaining_amount' => $remainingAmount,
+        'status' => $bill->status,
+        'requested_amount' => $validatedData['amount_paid'],
+    ]);
+    
+    // ✅ التحقق من أن هناك مبلغ متبقي للدفع (بدلاً من الاعتماد على status)
+    if ($remainingAmount <= 0) {
+        return response()->json([
+            'message' => 'This bill has already been fully paid.',
+            'total_paid' => $totalPaid,
+            'total_amount' => $totalAmount,
+            'remaining_amount' => $remainingAmount,
+        ], 422);
+    }
 
+    // ✅ التحقق من أن المبلغ المدفوع لا يتجاوز المتبقي
     if ($validatedData['amount_paid'] > $remainingAmount) {
-        return response()->json(['message' => 'Payment amount cannot be greater than the remaining amount.'], 422);
+        return response()->json([
+            'message' => 'Payment amount cannot be greater than the remaining amount.',
+            'remaining_amount' => $remainingAmount,
+            'requested_amount' => $validatedData['amount_paid'],
+        ], 422);
     }
 
     try {

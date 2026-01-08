@@ -54,34 +54,34 @@ class AuthController extends Controller
             'password' => 'required|string',
             'fcm_token' => 'nullable|string', // ✅ Add this
         ]);
-    
+
         $loginType = filter_var($request->login, FILTER_VALIDATE_EMAIL)
             ? 'email'
             : (is_numeric($request->login) && strlen($request->login) == 10 ? 'phone' : 'username');
-    
+
         $credentials = [
             $loginType => $request->login,
             'password' => $request->password,
         ];
-    
+
         logger("Login attempt with credentials: ", $credentials);
-    
+
         if (Auth::guard('web')->attempt($credentials)) {
             $user = Auth::user();
-    
+
             if (!$user) {
                 logger("Login failed - user not found after Auth::attempt.");
                 return response()->json(['message' => 'Login failed, user not found.'], 500);
             }
-    
+
             // ✅ Save FCM token if sent
             if ($request->filled('fcm_token')) {
                 $user->fcm_token = $request->fcm_token;
                 $user->save();
             }
-    
+
             $token = $user->createToken('authToken')->plainTextToken;
-    
+
             ActivityLog::create([
                 'user_id' => $user->id,
                 'action' => 'login',
@@ -89,24 +89,24 @@ class AuthController extends Controller
                 'new_data' => json_encode($user->username),
                 'created_at' => now(),
             ]);
-    
+
             $admins = User::where('user_type', 'admin')->get();
             foreach ($admins as $admin) {
                 $admin->notify(new LoginNotification($user));
             }
-    
+
             return response()->json(['token' => $token, 'user' => $user,
             'debug_fcm_token_received' => $request->fcm_token,
             'badges' => $user->badges, // Add this line
 
         ], 200);
         }
-    
+
         logger("Login failed - invalid credentials provided.");
         return response()->json(['message' => 'Invalid credentials.'], 401);
     }
-    
-    
+
+
 
 
     public function loginApp(Request $request)
@@ -116,36 +116,36 @@ class AuthController extends Controller
             'password' => 'required|string',
             'fcm_token' => 'nullable|string', // ✅ Add this
         ]);
-    
+
         $loginType = filter_var($request->login, FILTER_VALIDATE_EMAIL)
             ? 'email'
             : (is_numeric($request->login) && strlen($request->login) == 10 ? 'phone' : 'username');
-    
+
         $credentials = [
             $loginType => $request->login,
             'password' => $request->password,
         ];
-    
+
         logger("Login attempt with credentials: ", $credentials);
-    
+
         if (Auth::guard('web')->attempt($credentials)) {
             $user = Auth::user();
             $user->last_activity = now(); // Update last activity immediately
             $user->save();
-    
+
             if (!$user) {
                 logger("Login failed - user not found after Auth::attempt.");
                 return response()->json(['message' => 'Login failed, user not found.'], 500);
             }
-    
+
             // ✅ Save FCM token if sent
             if ($request->filled('fcm_token')) {
                 $user->fcm_token = $request->fcm_token;
                 $user->save();
             }
-    
+
             $token = $user->createToken('authToken')->plainTextToken;
-    
+
             ActivityLog::create([
                 'user_id' => $user->id,
                 'action' => 'login',
@@ -153,31 +153,53 @@ class AuthController extends Controller
                 'new_data' => json_encode($user->username),
                 'created_at' => now(),
             ]);
-    
+
             $admins = User::where('user_type', 'admin')->get();
             foreach ($admins as $admin) {
                 $admin->notify(new LoginNotification($user));
             }
-    
+
            // In both login and loginApp functions, update the return response to include badges
+           // ✅ جلب Edura endpoint و API token لجميع المستخدمين
+           // ✅ مطلوب للوالدين لعرض تقارير الدرجات عبر /parent/grade-reports/
+           // ✅ مطلوب للمعلمين لإدارة الدرجات والسياسات
+
+           // ✅ في Development: http://127.0.0.1:8000/api (من .env)
+           // ✅ في Production: https://edura.ly/api (من .env أو مستخرج من subdomain)
+           // ✅ البنية المستهدفة:
+           //    - edura-system: https://edura.ly/ (ثابت)
+           //    - school-app: https://lws.edura.ly/, https://school2.edura.ly/, etc. (subdomains)
+
+           // ✅ محاولة استخراج edura_endpoint من subdomain تلقائياً
+           $eduraEndpoint = $this->getEduraEndpointFromRequest($request)
+               ?? config('edura.endpoint'); // Fallback to .env
+
+           $eduraApiToken = config('edura.api_token');
+
+           // ✅ ملاحظة: النظام يحاول استخراج edura_endpoint تلقائياً من subdomain
+           // ✅ إذا كان school-app على subdomain من edura.ly (مثل: lws.edura.ly)
+           // ✅ سيستخدم https://edura.ly/api تلقائياً
+           // ✅ Fallback: يمكن استخدام .env: EDURA_ENDPOINT للتجاوز
+
            return response()->json([
             'token' => $token,
             'user' => $user,
             'badges' => $user->badges, // Explicitly include badges
             'is_online' => true, // Force online status on login
             'last_activity' => $user->last_activity,
-
+            'edura_endpoint' => $eduraEndpoint, // إضافة Edura endpoint إذا كان متوفراً
+            'edura_api_token' => $eduraApiToken, // إضافة Edura API token إذا كان متوفراً
             'debug_fcm_token_received' => $request->fcm_token,
         ], 200);
         }
-    
+
         logger("Login failed - invalid credentials provided.");
         return response()->json(['message' => 'Invalid credentials.'], 401);
     }
-    
-    
-    
-    
+
+
+
+
 
     // Logout the user
     public function logout(Request $request)
@@ -192,5 +214,40 @@ class AuthController extends Controller
         $request->user()->currentAccessToken()->delete();
 
         return response()->json(['message' => 'Successfully logged out']);
+    }
+
+    /**
+     * ✅ استخراج edura_endpoint من request host تلقائياً
+     *
+     * البنية المستهدفة:
+     * - edura-system: https://edura.ly/ (ثابت)
+     * - school-app: https://lws.edura.ly/, https://school2.edura.ly/, etc. (subdomains)
+     *
+     * إذا كان school-app على subdomain من edura.ly، يتم استخراج edura.ly تلقائياً
+     */
+    private function getEduraEndpointFromRequest(Request $request): ?string
+    {
+        $host = $request->getHost();
+
+        // ✅ Development: localhost
+        if (in_array($host, ['127.0.0.1', 'localhost']) || str_contains($host, 'localhost')) {
+            // في development، نستخدم config أو القيمة الافتراضية
+            return config('edura.endpoint') ?? 'http://127.0.0.1:8000/api';
+        }
+
+        // ✅ Production: إذا كان subdomain من edura.ly (مثل: lws.edura.ly)
+        if (str_ends_with($host, '.edura.ly')) {
+            // استخراج base domain: lws.edura.ly → edura.ly
+            return 'https://edura.ly/api';
+        }
+
+        // ✅ Production: إذا كان مباشرة edura.ly (غير متوقع لكن محتمل)
+        if ($host === 'edura.ly') {
+            return 'https://edura.ly/api';
+        }
+
+        // ✅ Fallback: استخدام config من .env
+        // يمكن استخدام .env للتجاوز في حالات خاصة
+        return null;
     }
 }

@@ -20,9 +20,19 @@ class NewGroupMessageNotification extends Notification
 
     public function __construct(Message $message)
     {
+        \Illuminate\Support\Facades\Log::info('[NewGroupMessageNotification] 🔧 Constructing notification', [
+            'message_id' => $message->id,
+        ]);
+        
         $this->message = $message->loadMissing(['group', 'sender']);
         $this->groupName = $this->message->group->name ?? 'Group';
         $this->senderName = $this->message->sender->name ?? 'User';
+        
+        \Illuminate\Support\Facades\Log::info('[NewGroupMessageNotification] ✅ Notification constructed', [
+            'message_id' => $message->id,
+            'group_name' => $this->groupName,
+            'sender_name' => $this->senderName,
+        ]);
     }
 
     public function via($notifiable)
@@ -48,11 +58,27 @@ class NewGroupMessageNotification extends Notification
 
     public function toFcm($notifiable): FcmMessage
     {
+        \Illuminate\Support\Facades\Log::info('[NewGroupMessageNotification@toFcm] 🔧 Building FCM message', [
+            'message_id' => $this->message->id,
+            'notifiable_id' => $notifiable->id ?? 'N/A',
+            'notifiable_class' => get_class($notifiable),
+            'fcm_token' => method_exists($notifiable, 'routeNotificationForFcm') ? ($notifiable->routeNotificationForFcm() ? substr($notifiable->routeNotificationForFcm(), 0, 50) . '...' : 'NULL') : 'N/A',
+        ]);
+        
         $content = $this->message->content ?? $this->getMediaTypeMessage() ?? 'New message';
         
-        return (new FcmMessage(notification: new FcmNotification(
-            title: 'New message in ' . $this->groupName,
-            body: $this->senderName . ': ' . $content,
+        $title = 'New message in ' . $this->groupName;
+        $body = $this->senderName . ': ' . $content;
+        
+        \Illuminate\Support\Facades\Log::info('[NewGroupMessageNotification@toFcm] 📝 Notification content', [
+            'title' => $title,
+            'body' => $body,
+            'content' => $content,
+        ]);
+        
+        $fcmMessage = (new FcmMessage(notification: new FcmNotification(
+            title: $title,
+            body: $body,
         )))
         ->data([
             'type' => 'group_message',
@@ -63,12 +89,18 @@ class NewGroupMessageNotification extends Notification
         ])
         ->custom([
             'android' => [
+                'priority' => 'high', // ✅ إرسال إشعارات عالية الأولوية
                 'notification' => [
-                    'color' => '#0A0A0A', // Optional: Set Android notification color
-                    'sound' => 'default', // Optional: Set Android notification sound
+                    'channel_id' => 'bus_tracking_channel', // ✅ يجب أن يتطابق مع channel في Flutter app
+                    'color' => '#1a237e', // ✅ استخدام اللون الرئيسي للتطبيق
+                    'sound' => 'default',
+                    'priority' => 'high',
+                    'notification_priority' => 'PRIORITY_HIGH', // ✅ إرسال إشعارات عالية الأولوية
+                    'default_sound' => true,
+                    'default_vibrate_timings' => true,
                 ],
                 'fcm_options' => [
-                    'analytics_label' => 'analytics', // Optional: Set Android analytics label
+                    'analytics_label' => 'group_message',
                 ],
             ],
             'apns' => [
@@ -87,6 +119,15 @@ class NewGroupMessageNotification extends Notification
             //     ],
             // ],
         ]);
+        
+        \Illuminate\Support\Facades\Log::info('[NewGroupMessageNotification@toFcm] ✅ FCM message built successfully', [
+            'message_id' => $this->message->id,
+            'has_notification' => true,
+            'has_data' => true,
+            'has_android_config' => true,
+        ]);
+        
+        return $fcmMessage;
     }
 
     protected function getMediaTypeMessage(): ?string

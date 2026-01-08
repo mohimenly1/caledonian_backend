@@ -14,6 +14,8 @@ class UserFilterController extends Controller
     {
         $request->validate([
             'user_type' => 'nullable|string',
+            'user_id' => 'nullable|integer|exists:users,id', // ✅ إضافة user_id للبحث عن طالب محدد
+            'student_id' => 'nullable|integer|exists:students,id', // ✅ إضافة student_id للبحث عن طالب محدد
             'class_id' => 'nullable|exists:classes,id',
             'section_id' => 'nullable|exists:sections,id',
             'search' => 'nullable|string',
@@ -114,6 +116,16 @@ class UserFilterController extends Controller
     protected function filterStudents(Request $request, $perPage)
     {
         $query = Student::with(['user', 'class', 'section'])
+            ->when($request->student_id, function($q) use ($request) {
+                // ✅ البحث عن طالب محدد باستخدام student_id (الأولوية)
+                $q->where('id', $request->student_id);
+            })
+            ->when($request->user_id && !$request->student_id, function($q) use ($request) {
+                // ✅ البحث عن طالب محدد باستخدام user_id (إذا لم يتم تحديد student_id)
+                $q->whereHas('user', function($userQuery) use ($request) {
+                    $userQuery->where('id', $request->user_id);
+                });
+            })
             ->when($request->class_id, function($q) use ($request) {
                 $q->where('class_id', $request->class_id);
             })

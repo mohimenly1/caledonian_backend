@@ -7,6 +7,8 @@ use App\Models\ParentInfo;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class UserController extends Controller
 {
@@ -156,9 +158,127 @@ public function show(User $user)
         return response()->json(['message' => 'User account updated successfully.','user' => $user]);
     }
 
-    public function destroy(User $user)
+    public function destroy(User $users_controller)
     {
-        $user->delete();
-        return response()->json(['message' => 'User has been soft-deleted successfully.']);
+        // ✅ استخدام نفس اسم الـ parameter الذي يستخدمه route model binding
+        $user = $users_controller;
+        
+        try {
+            // ✅ التحقق من أن الـ user موجود وله ID صحيح
+            if (!$user || !$user->id) {
+                throw new \Exception('المستخدم غير موجود أو ID غير صحيح.');
+            }
+            
+            // ✅ استخدام database transaction لضمان الحذف الكامل
+            DB::beginTransaction();
+            
+            // 1. ✅ حذف جميع الإسنادات الدراسية للمعلم (teacher_course_assignments) باستخدام soft delete
+            // ✅ لأن soft delete للمعلم لا ينشئ cascade delete تلقائياً
+            $assignments = $user->teacherCourseAssignments()->get();
+            foreach ($assignments as $assignment) {
+                $assignment->delete(); // soft delete
+            }
+            
+            // 2. ✅ استخدام soft delete للمعلم (حذف ناعم)
+            // ✅ هذا سيضع deleted_at timestamp بدلاً من حذف السجل نهائياً
+            $user->delete();
+            
+            DB::commit();
+            
+            Log::info('[UserController::destroy] User soft-deleted successfully', [
+                'user_id' => $user->id,
+                'user_name' => $user->name ?? 'N/A',
+                'assignments_count' => $assignments->count()
+            ]);
+            
+            return response()->json([
+                'message' => 'تم حذف المستخدم بنجاح.',
+                'success' => true
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            
+            // ✅ تسجيل الخطأ للتحقق منه
+            Log::error('[UserController::destroy] Error deleting user', [
+                'user_id' => $user->id ?? null,
+                'user_name' => $user->name ?? 'N/A',
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            return response()->json([
+                'message' => 'حدث خطأ أثناء حذف المستخدم: ' . $e->getMessage(),
+                'success' => false,
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * ⭐⭐ استعادة معلم محذوف بشكل ناعم (soft deleted) ⭐⭐
+     */
+    public function restore($users_controller)
+    {
+        try {
+            // ✅ جلب المستخدم المحذوف باستخدام withTrashed() لأن route model binding لا يجلب soft deleted users
+            $user = User::withTrashed()->find($users_controller);
+            
+            // ✅ التحقق من أن الـ user موجود وله ID صحيح
+            if (!$user || !$user->id) {
+                return response()->json([
+                    'message' => 'المستخدم غير موجود أو ID غير صحيح.',
+                    'success' => false
+                ], 404);
+            }
+            
+            // ✅ التحقق من أن المستخدم محذوف بشكل ناعم
+            if (!$user->trashed()) {
+                return response()->json([
+                    'message' => 'المستخدم غير محذوف، لا يمكن استعادته.',
+                    'success' => false
+                ], 400);
+            }
+            
+            // ✅ استخدام database transaction لضمان الاستعادة الكاملة
+            DB::beginTransaction();
+            
+            // 1. ✅ استعادة جميع الإسنادات الدراسية للمعلم (teacher_course_assignments)
+            $assignments = $user->teacherCourseAssignments()->onlyTrashed()->get();
+            foreach ($assignments as $assignment) {
+                $assignment->restore(); // استعادة soft delete
+            }
+            
+            // 2. ✅ استعادة المعلم (soft delete)
+            $user->restore();
+            
+            DB::commit();
+            
+            Log::info('[UserController::restore] User restored successfully', [
+                'user_id' => $user->id,
+                'user_name' => $user->name ?? 'N/A',
+                'assignments_count' => $assignments->count()
+            ]);
+            
+            return response()->json([
+                'message' => 'تم استعادة المستخدم بنجاح.',
+                'success' => true
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            
+            // ✅ تسجيل الخطأ للتحقق منه
+            Log::error('[UserController::restore] Error restoring user', [
+                'user_id' => $user->id ?? null,
+                'user_name' => $user->name ?? 'N/A',
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            return response()->json([
+                'message' => 'حدث خطأ أثناء استعادة المستخدم: ' . $e->getMessage(),
+                'success' => false,
+                'error' => $e->getMessage()
+            ], 500);
+        }
     }
 }

@@ -151,11 +151,16 @@ class InvoiceController extends Controller
 
                 // تحديث حالة الفاتورة
                 $invoiceStatus = 'unpaid';
+                $invoiceStatus = 'unpaid';
                 if ($validatedData['amount_paid'] >= $finalAmount) {
                     $invoiceStatus = 'paid';
                 } elseif ($validatedData['amount_paid'] > 0) {
                     $invoiceStatus = 'partially_paid';
+                    $invoiceStatus = 'paid';
+                } elseif ($validatedData['amount_paid'] > 0) {
+                    $invoiceStatus = 'partially_paid';
                 }
+                $invoice->update(['status' => $invoiceStatus]);
                 $invoice->update(['status' => $invoiceStatus]);
             }
 
@@ -216,40 +221,84 @@ class InvoiceController extends Controller
                 'description' => $payment->description,
             ];
         });
+        // حساب المبلغ المدفوع والمتبقي
+        $paidAmount = $invoice->payments()
+            ->where('type', 'income')
+            ->sum('amount');
 
+        $remainingAmount = $invoice->final_amount - $paidAmount;
+
+        // تحديد الحالة بناءً على المبلغ المدفوع
+        $invoiceStatus = 'unpaid';
+        if ($paidAmount >= $invoice->final_amount && $invoice->final_amount > 0) {
+            $invoiceStatus = 'paid';
+        } elseif ($paidAmount > 0 && $paidAmount < $invoice->final_amount) {
+            $invoiceStatus = 'partially_paid';
+        } elseif ($paidAmount <= 0 && $invoice->final_amount > 0) {
+            $invoiceStatus = 'unpaid';
+        } else {
+            $invoiceStatus = 'paid';
+        }
+
+        // إضافة الحقول المحسوبة إلى الاستجابة
+        $invoiceArray = $invoice->toArray();
+        $invoiceArray['paid_amount'] = $paidAmount;
+        $invoiceArray['remaining_amount'] = $remainingAmount;
+        $invoiceArray['status'] = $invoiceStatus;
+        $invoiceArray['payments'] = $invoice->payments->map(function ($payment) {
+            return [
+                'id' => $payment->id,
+                'amount' => $payment->amount,
+                'payment_date' => $payment->payment_date->format('Y-m-d'),
+                'treasury_name' => $payment->treasury->name ?? null,
+                'description' => $payment->description,
+            ];
+        });
+
+        return response()->json($invoiceArray);
         return response()->json($invoiceArray);
     }
 
 
     /**
      * Remove the specified invoice from storage.
+     * ✅ يمكن حذف الفواتير حتى التي لديها مدفوعات
      */
     public function destroy(Invoice $invoice)
     {
         try {
-            // التحقق من وجود مدفوعات من نوع income فقط
-            $hasPayments = $invoice->payments()
-                ->where('type', 'income')
-                ->exists();
+            DB::beginTransaction();
 
-            if ($hasPayments) {
-                return response()->json([
-                    'message' => 'لا يمكن حذف الفاتورة التي تحتوي على مدفوعات.',
-                    'error' => 'invoice_has_payments'
-                ], 422);
-            }
-
-            // حفظ معلومات الفاتورة قبل الحذف
+            // ✅ حفظ معلومات الفاتورة قبل الحذف
             $invoiceId = $invoice->id;
             $invoiceNumber = $invoice->invoice_number;
 
-            // حذف بنود الفاتورة أولاً (إذا كانت موجودة)
+            // ✅ جلب جميع المدفوعات المرتبطة بالفاتورة
+            $payments = $invoice->payments()
+                ->where('type', 'income')
+                ->with('treasury')
+                ->get();
+
+            // ✅ تحديث أرصدة الخزائن (إرجاع المبالغ المدفوعة)
+            foreach ($payments as $payment) {
+                if ($payment->treasury) {
+                    $payment->treasury->balance -= $payment->amount;
+                    $payment->treasury->save();
+                }
+            }
+
+            // ✅ حذف جميع المدفوعات المرتبطة بالفاتورة
+            $invoice->payments()->delete();
+
+            // ✅ حذف بنود الفاتورة
             if ($invoice->items()->exists()) {
                 $invoice->items()->delete();
             }
 
-            // حذف الفاتورة
+            // ✅ حذف الفاتورة
             $invoice->delete();
+
+            DB::commit();
 
             return response()->json([
                 'message' => 'تم حذف الفاتورة بنجاح.',
@@ -257,6 +306,7 @@ class InvoiceController extends Controller
                 'invoice_number' => $invoiceNumber,
             ]);
         } catch (\Exception $e) {
+            DB::rollBack();
             return response()->json([
                 'message' => 'حدث خطأ أثناء حذف الفاتورة.',
                 'error' => $e->getMessage()
@@ -462,11 +512,75 @@ class InvoiceController extends Controller
                 ];
             });
 
+        // 4. ⭐⭐ جلب الفواتير الحالية لولي الأمر ⭐⭐
+        $invoices = Invoice::where('parent_id', $parent->id)
+            ->with([
+                'items.student:id,name',
+                'items.feeStructure.feeType:id,name',
+                'payments.treasury:id,name'
+            ])
+            ->withSum(['payments as paid_amount' => function ($query) {
+                $query->where('type', 'income');
+            }], 'amount')
+            ->orderBy('issue_date', 'desc')
+            ->get()
+            ->map(function ($invoice) {
+                $paidAmount = $invoice->paid_amount ?? 0;
+                $remainingAmount = $invoice->final_amount - $paidAmount;
+
+                // تحديد الحالة بناءً على المبلغ المدفوع
+                $invoiceStatus = 'unpaid';
+                if ($paidAmount >= $invoice->final_amount && $invoice->final_amount > 0) {
+                    $invoiceStatus = 'paid';
+                } elseif ($paidAmount > 0 && $paidAmount < $invoice->final_amount) {
+                    $invoiceStatus = 'partially_paid';
+                } elseif ($paidAmount <= 0 && $invoice->final_amount > 0) {
+                    $invoiceStatus = 'unpaid';
+                } else {
+                    $invoiceStatus = 'paid'; // للفواتير ذات القيمة الصفرية
+                }
+
+                return [
+                    'id' => $invoice->id,
+                    'invoice_number' => $invoice->invoice_number,
+                    'issue_date' => $invoice->issue_date->format('Y-m-d'),
+                    'due_date' => $invoice->due_date->format('Y-m-d'),
+                    'total_amount' => $invoice->total_amount,
+                    'discount' => $invoice->discount,
+                    'final_amount' => $invoice->final_amount,
+                    'paid_amount' => $paidAmount,
+                    'remaining_amount' => $remainingAmount,
+                    'status' => $invoiceStatus,
+                    'study_year_id' => $invoice->study_year_id,
+                    'items' => $invoice->items->map(function ($item) {
+                        return [
+                            'id' => $item->id,
+                            'student_id' => $item->student_id,
+                            'student_name' => $item->student->name ?? null,
+                            'fee_structure_id' => $item->fee_structure_id,
+                            'fee_type_name' => $item->feeStructure->feeType->name ?? null,
+                            'description' => $item->description,
+                            'amount' => $item->amount,
+                        ];
+                    }),
+                    'payments' => $invoice->payments->map(function ($payment) {
+                        return [
+                            'id' => $payment->id,
+                            'amount' => $payment->amount,
+                            'payment_date' => $payment->payment_date->format('Y-m-d'),
+                            'treasury_name' => $payment->treasury->name ?? null,
+                            'description' => $payment->description,
+                        ];
+                    }),
+                ];
+            });
+
         return response()->json([
             'parent' => $parent,
             'students' => $students,
             'feeStructures' => $feeStructures, // Now contains fees for ALL children
             'siblingDiscountPolicy' => $discountPolicy,
+            'invoices' => $invoices, // ⭐⭐ الفواتير الحالية ⭐⭐
             'invoices' => $invoices, // ⭐⭐ الفواتير الحالية ⭐⭐
         ]);
     }

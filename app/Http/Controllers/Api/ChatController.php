@@ -20,6 +20,7 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\File;
+use Laravel\Sanctum\PersonalAccessToken;
 class ChatController extends Controller
 {
     // List all public groups and groups the user is member of
@@ -148,22 +149,21 @@ public function filterUsers(Request $request)
             $query->where('user_type', 'teacher');
 
             if ($request->class_id) {
-                $query->whereHas('employee', function($q) use ($request) {
-                    $q->where('is_teacher', true)
-                      ->whereHas('classes', function($q) use ($request) {
-                          $q->where('class_id', $request->class_id);
-                      });
+                // ✅ استخدام teacherCourseAssignments -> courseOffering -> class_id/section_id
+                $query->whereHas('teacherCourseAssignments', function($q) use ($request) {
+                    $q->whereHas('courseOffering', function($q) use ($request) {
+                        $q->where('class_id', $request->class_id);
 
-                    if ($request->section_id) {
-                        $q->whereHas('sections', function($q) use ($request) {
+                        if ($request->section_id) {
                             $q->where('section_id', $request->section_id);
-                        });
-                    }
+                        }
+                    });
                 });
 
                 Log::debug("[FilterUsers] البحث عن المعلمين للفصل", [
                     'class_id' => $request->class_id,
-                    'section_id' => $request->section_id
+                    'section_id' => $request->section_id,
+                    'query_type' => 'teacherCourseAssignments -> courseOffering'
                 ]);
             }
 
@@ -171,7 +171,23 @@ public function filterUsers(Request $request)
             // ✅ البحث عن الطلاب في الفصل/الشعبة المحددة
             $query->where('user_type', 'student');
 
-            if ($request->class_id) {
+            // ✅ البحث عن طالب محدد باستخدام student_id (الأولوية)
+            if ($request->student_id) {
+                $query->whereHas('student', function($q) use ($request) {
+                    $q->where('id', $request->student_id);
+                });
+
+                Log::debug("[FilterUsers] البحث عن طالب محدد", [
+                    'student_id' => $request->student_id
+                ]);
+            } elseif ($request->user_id) {
+                // ✅ البحث عن طالب محدد باستخدام user_id
+                $query->where('id', $request->user_id);
+
+                Log::debug("[FilterUsers] البحث عن طالب باستخدام user_id", [
+                    'user_id' => $request->user_id
+                ]);
+            } elseif ($request->class_id) {
                 $query->whereHas('student', function($q) use ($request) {
                     $q->where('class_id', $request->class_id);
 
@@ -195,18 +211,18 @@ public function filterUsers(Request $request)
         // ✅ إذا لم يتم تحديد user_type، البحث عن جميع المستخدمين (معلمين وأولياء أمور) في الفصل
         if ($request->class_id) {
             $query->where(function($q) use ($request) {
-                // Teachers assigned to the class
-                $q->whereHas('employee', function($q) use ($request) {
-                    $q->where('is_teacher', true)
-                      ->whereHas('classes', function($q) use ($request) {
-                          $q->where('class_id', $request->class_id);
-                      });
+                // ✅ Teachers assigned to the class through CourseOffering
+                $q->where(function($teacherQuery) use ($request) {
+                    $teacherQuery->where('user_type', 'teacher')
+                        ->whereHas('teacherCourseAssignments', function($q) use ($request) {
+                            $q->whereHas('courseOffering', function($q) use ($request) {
+                                $q->where('class_id', $request->class_id);
 
-                    if ($request->section_id) {
-                        $q->whereHas('sections', function($q) use ($request) {
-                            $q->where('section_id', $request->section_id);
+                                if ($request->section_id) {
+                                    $q->where('section_id', $request->section_id);
+                                }
+                            });
                         });
-                    }
                 });
 
                 // Parents whose children study in the class
@@ -929,16 +945,118 @@ public function getMessage(ChatGroup $group, $messageId)
 // Send message to group
 public function sendMessage(Request $request, ChatGroup $group)
 {
-    $user = Auth::user();
+    Log::info('[ChatController@sendMessage] ========== RECEIVED REQUEST ==========', [
+        'group_id' => $group->id,
+        'group_name' => $group->name,
+        'request_method' => $request->method(),
+        'request_url' => $request->fullUrl(),
+        'request_headers' => $request->headers->all(),
+        'has_auth_header' => $request->hasHeader('Authorization'),
+        'authorization_header' => $request->header('Authorization') ? substr($request->header('Authorization'), 0, 20) . '...' : null,
+        'x_school_user_id' => $request->header('X-School-User-Id'),
+        'request_all' => $request->all(),
+        'has_content' => $request->has('content'),
+        'has_media' => $request->hasFile('media'),
+    ]);
+
+    // ✅ ✅ ✅ الحل الجديد: استخدام المستخدم الأصلي من api_token ✅ ✅ ✅
+    // ✅ جلب الـ token من Authorization header
+    $authHeader = $request->header('Authorization');
+    $token = null;
+
+    if ($authHeader && str_starts_with($authHeader, 'Bearer ')) {
+        $token = substr($authHeader, 7); // إزالة "Bearer " من البداية
+    }
+
+    Log::info('[ChatController@sendMessage] 🔐 AUTHENTICATION CHECK', [
+        'has_auth_header' => !empty($authHeader),
+        'token_preview' => $token ? substr($token, 0, 20) . '...' : null,
+        'auth_guard' => Auth::getDefaultDriver(),
+        'current_user' => Auth::user()?->id,
+    ]);
+
+    // ✅ ✅ ✅ البحث عن المستخدم الأصلي من خلال api_token (Personal Access Token)
+    if ($token) {
+        Log::info('[ChatController@sendMessage] 🔍 LOOKING UP USER BY API TOKEN', [
+            'token_preview' => substr($token, 0, 20) . '...',
+        ]);
+
+        // البحث عن Personal Access Token في قاعدة البيانات
+        $accessToken = PersonalAccessToken::findToken($token);
+
+        if ($accessToken && $accessToken->tokenable) {
+            // جلب المستخدم المرتبط بالـ token
+            $user = $accessToken->tokenable;
+
+            // التحقق من أن tokenable هو User model
+            if ($user instanceof User) {
+                Log::info('[ChatController@sendMessage] ✅ USER FOUND BY API TOKEN', [
+                    'user_id' => $user->id,
+                    'user_name' => $user->name,
+                    'user_email' => $user->email,
+                    'user_type' => $user->user_type,
+                    'token_id' => $accessToken->id,
+                ]);
+
+                // تعيين المستخدم الأصلي للمصادقة
+                Auth::setUser($user);
+            } else {
+                Log::error('[ChatController@sendMessage] ❌ TOKENABLE IS NOT USER', [
+                    'tokenable_type' => get_class($user),
+                    'token_id' => $accessToken->id,
+                ]);
+                return response()->json(['message' => 'Invalid token owner'], 401);
+            }
+        } else {
+            Log::error('[ChatController@sendMessage] ❌ TOKEN NOT FOUND OR INVALID', [
+                'token_preview' => substr($token, 0, 20) . '...',
+            ]);
+            return response()->json(['message' => 'Invalid or expired token'], 401);
+        }
+    } else {
+        // ✅ Fallback: إذا لم يكن هناك token، نستخدم Sanctum authentication العادي
+        Log::info('[ChatController@sendMessage] 🔑 USING SANCTUM AUTH (FALLBACK)', []);
+        $user = Auth::user();
+    }
+
+    if (!$user) {
+        Log::error('[ChatController@sendMessage] ❌ NO AUTHENTICATED USER', [
+            'has_token' => !empty($token),
+            'sanctum_user' => Auth::user()?->id,
+        ]);
+        return response()->json(['message' => 'Unauthorized'], 401);
+    }
+
+    Log::info('[ChatController@sendMessage] ✅ USER AUTHENTICATED', [
+        'user_id' => $user->id,
+        'user_name' => $user->name,
+        'user_type' => $user->user_type,
+    ]);
 
     // Check if user is member of the group and not blocked
     $member = $group->members()
         ->where('user_id', $user->id)
         ->first();
 
+    Log::info('[ChatController@sendMessage] 👥 MEMBERSHIP CHECK', [
+        'user_id' => $user->id,
+        'group_id' => $group->id,
+        'has_member' => $member !== null,
+        'is_blocked' => $member?->pivot->is_blocked ?? null,
+        'total_members' => $group->members()->count(),
+    ]);
+
     if (!$member || $member->pivot->is_blocked) {
+        Log::error('[ChatController@sendMessage] ❌ NOT MEMBER OR BLOCKED', [
+            'user_id' => $user->id,
+            'group_id' => $group->id,
+            'has_member' => $member !== null,
+            'is_blocked' => $member?->pivot->is_blocked ?? null,
+        ]);
         return response()->json(['message' => 'Unauthorized'], 403);
     }
+
+    Log::info('[ChatController@sendMessage] ✅ MEMBERSHIP OK', []);
 
     if ($group->chat_disabled_for_parents) {
         // فقط المعلمين والأدمن يمكنهم النشر
@@ -949,7 +1067,18 @@ public function sendMessage(Request $request, ChatGroup $group)
             ->exists();
         $isModer = $user->hasBadge('moder');
 
+        Log::info('[ChatController@sendMessage] 🔒 CHAT DISABLED FOR PARENTS CHECK', [
+            'chat_disabled_for_parents' => $group->chat_disabled_for_parents,
+            'user_type' => $user->user_type,
+            'is_teacher' => $isTeacher,
+            'is_admin' => $isAdmin,
+            'is_moder' => $isModer,
+        ]);
+
         if (!$isTeacher && !$isAdmin && !$isModer) {
+            Log::error('[ChatController@sendMessage] ❌ PARENT CANNOT SEND', [
+                'user_type' => $user->user_type,
+            ]);
             return response()->json([
                 'message' => 'الدردشة معطلة لأولياء الأمور في هذه المجموعة',
                 'chat_disabled_for_parents' => true
@@ -957,16 +1086,74 @@ public function sendMessage(Request $request, ChatGroup $group)
         }
     }
 
-    $validator = Validator::make($request->all(), [
-        'content' => 'required_without:media|string',
-        'media' => 'required_without:content|file|mimes:jpg,jpeg,png,gif,mp4,mov,avi,pdf,doc,docx,mp3,wav,xlsx,webm,aac,adts,m4a',
-        'reply_to_message_id' => 'nullable|exists:messages,id', // إضافة التحقق من الرد
-    ]);
+    // ✅ التحقق من رسالة النظام أولاً (قبل التحقق من المحتوى)
+    $isSystemMessage = $request->input('is_system_message', false) || $request->input('message_type') === 'system';
+    $systemMessageType = $request->input('system_message_type');
 
-    if ($validator->fails()) {
-        return response()->json($validator->errors(), 422);
+    // ✅ للرسائل النظامية، نتخطى التحقق من المحتوى
+    if ($isSystemMessage) {
+        // رسائل النظام لا تحتاج محتوى أو media
+        // ✅ استخدام chat_group_id حسب Message model
+        $messageData = [
+            'sender_id' => $user->id,
+            'chat_group_id' => $group->id, // ✅ استخدام chat_group_id حسب Message model
+            'content' => $request->input('content', ''),
+            'message_type' => 'system',
+            'is_system_message' => true,
+            'system_message_type' => $systemMessageType, // ✅ يجب أن يكون 'assignment_added' للواجبات
+            'reply_to_message_id' => null, // رسائل النظام لا تحتاج رد
+        ];
+
+        // ✅ إضافة البيانات الإضافية للواجبات (مهم جداً للعرض في الواجهة)
+        if ($request->has('assignment_id')) {
+            $messageData['assignment_id'] = $request->input('assignment_id');
+            $messageData['assignment_type'] = $request->input('assignment_type');
+            $messageData['teacher_external_id'] = $request->input('teacher_external_id');
+
+            Log::info('[ChatController@sendMessage] ✅ Adding assignment data to system message', [
+                'assignment_id' => $messageData['assignment_id'],
+                'assignment_type' => $messageData['assignment_type'],
+                'system_message_type' => $messageData['system_message_type'],
+            ]);
+        }
+
+        // إنشاء رسالة النظام مباشرة
+        try {
+            $message = Message::create($messageData);
+
+            // إنشاء statuses لجميع الأعضاء
+            $members = $group->members()
+                ->where('is_blocked', false)
+                ->pluck('user_id');
+
+            $statuses = [];
+            foreach ($members as $memberId) {
+                $statuses[] = [
+                    'message_id' => $message->id,
+                    'user_id' => $memberId,
+                    'is_read' => false,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ];
+            }
+
+            if (!empty($statuses)) {
+                MessageStatus::insert($statuses);
+            }
+
+            // تحميل معلومات الرسالة
+            $message->load(['sender']);
+
+            return response()->json($message, 201);
+        } catch (\Exception $e) {
+            Log::error('[ChatController@sendMessage] Error creating system message: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+            ]);
+            return response()->json(['message' => 'Failed to create system message'], 500);
+        }
     }
 
+    // ✅ للرسائل العادية
     $messageData = [
         'sender_id' => $user->id,
         'chat_group_id' => $group->id,
@@ -997,60 +1184,226 @@ public function sendMessage(Request $request, ChatGroup $group)
     }
 
 
-    $message = Message::create($messageData);
+    Log::info('[ChatController@sendMessage] 💾 CREATING MESSAGE', [
+        'message_data' => $messageData,
+    ]);
 
-    // تحميل معلومات الرسالة المردودة مع الاستجابة
-    $message->load(['repliedMessage.sender']);
+    try {
+        $message = Message::create($messageData);
 
-    // Create message status for all members except sender
-    $members = $group->members()
-        ->where('user_id', '!=', $user->id)
-        ->where('is_blocked', false)
-        ->pluck('user_id');
-
-    $statuses = [];
-    foreach ($members as $memberId) {
-        $statuses[] = [
+        Log::info('[ChatController@sendMessage] ✅ MESSAGE CREATED', [
             'message_id' => $message->id,
-            'user_id' => $memberId,
-            'is_read' => false,
-            'created_at' => now(),
-            'updated_at' => now(),
-        ];
-    }
-
-    if (!empty($statuses)) {
-        MessageStatus::insert($statuses);
-    }
-
-    // Notify all group members except sender
-    $recipients = $group->members()
-        ->where('user_id', '!=', $user->id)
-        ->where('is_blocked', false)
-        ->get();
-
-    $content = $message->content ?? $this->getMediaTypeForContent($message->message_type) ?? 'New message';
-
-    foreach ($recipients as $recipient) {
-        // Store notification in database
-        $recipient->caledonianNotifications()->create([
-            'title' => 'New message in ' . $group->name,
-            'body' => $user->name . ': ' . $content,
-            'data' => [
-                'type' => 'group_message',
-                'group_id' => $group->id,
-                'message_id' => $message->id,
-                'sender_id' => $user->id,
-            ],
+            'sender_id' => $message->sender_id,
+            'group_id' => $message->chat_group_id,
         ]);
 
-        // Send FCM notification if token exists
-        if ($recipient->fcm_token) {
-            $recipient->notify(new NewGroupMessageNotification($message));
-        }
-    }
+        // تحميل معلومات الرسالة المردودة مع الاستجابة
+        $message->load(['repliedMessage.sender']);
 
-    return response()->json($message, 201);
+        // Create message status for all members except sender
+        $members = $group->members()
+            ->where('user_id', '!=', $user->id)
+            ->where('is_blocked', false)
+            ->pluck('user_id');
+
+        $statuses = [];
+        foreach ($members as $memberId) {
+            $statuses[] = [
+                'message_id' => $message->id,
+                'user_id' => $memberId,
+                'is_read' => false,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ];
+        }
+
+        if (!empty($statuses)) {
+            MessageStatus::insert($statuses);
+            Log::info('[ChatController@sendMessage] ✅ MESSAGE STATUSES CREATED', [
+                'statuses_count' => count($statuses),
+            ]);
+        }
+
+        // Notify all group members except sender
+        $recipients = $group->members()
+            ->where('user_id', '!=', $user->id)
+            ->where('is_blocked', false)
+            ->get();
+
+        $content = $message->content ?? $this->getMediaTypeForContent($message->message_type) ?? 'New message';
+
+        Log::info('[ChatController@sendMessage] 📢 SENDING NOTIFICATIONS', [
+            'recipients_count' => $recipients->count(),
+        ]);
+
+        foreach ($recipients as $recipient) {
+            // Store notification in database
+            $recipient->caledonianNotifications()->create([
+                'title' => 'New message in ' . $group->name,
+                'body' => $user->name . ': ' . $content,
+                'data' => [
+                    'type' => 'group_message',
+                    'group_id' => $group->id,
+                    'message_id' => $message->id,
+                    'sender_id' => $user->id,
+                ],
+            ]);
+
+            // Send FCM notification if token exists
+            Log::info('[ChatController@sendMessage] 🔍 DEBUG: Checking notification for recipient', [
+                'recipient_id' => $recipient->id,
+                'recipient_name' => $recipient->name,
+                'has_fcm_token' => !empty($recipient->fcm_token),
+                'fcm_token_preview' => $recipient->fcm_token ? substr($recipient->fcm_token, 0, 50) . '...' : 'NULL',
+            ]);
+
+            if ($recipient->fcm_token) {
+                try {
+                    Log::info('[ChatController@sendMessage] 📤 Attempting to send FCM notification', [
+                        'recipient_id' => $recipient->id,
+                        'recipient_name' => $recipient->name,
+                        'fcm_token' => substr($recipient->fcm_token, 0, 50) . '...',
+                        'message_id' => $message->id,
+                        'group_id' => $group->id,
+                        'sender_id' => $user->id,
+                        'sender_name' => $user->name,
+                    ]);
+
+                    // ✅ Use Firebase Messaging directly instead of NotificationChannels\Fcm
+                    try {
+                        // ✅ Use the same approach as FirebaseTestController
+                        $credentialsPath = config('firebase.projects.app.credentials');
+
+                        if (!$credentialsPath || !file_exists($credentialsPath)) {
+                            Log::error('[ChatController@sendMessage] ❌ Firebase credentials not found', [
+                                'recipient_id' => $recipient->id,
+                                'credentials_path' => $credentialsPath,
+                            ]);
+                            continue;
+                        }
+
+                        $factory = (new \Kreait\Firebase\Factory)->withServiceAccount($credentialsPath);
+                        $messaging = $factory->createMessaging();
+                        $fcmToken = $recipient->fcm_token;
+
+                        $content = $message->content ?? $this->getMediaTypeForContent($message->message_type) ?? 'New message';
+                        $title = 'New message in ' . $group->name;
+                        $body = $user->name . ': ' . $content;
+
+                        Log::info('[ChatController@sendMessage] 🔥 Using Firebase Messaging directly', [
+                            'recipient_id' => $recipient->id,
+                            'fcm_token_preview' => substr($fcmToken, 0, 50) . '...',
+                            'title' => $title,
+                            'body' => $body,
+                        ]);
+
+                        $fcmMessage = \Kreait\Firebase\Messaging\CloudMessage::withTarget('token', $fcmToken)
+                            ->withNotification(\Kreait\Firebase\Messaging\Notification::create($title, $body))
+                            ->withData([
+                                'type' => 'group_message',
+                                'group_id' => (string)$group->id,
+                                'message_id' => (string)$message->id,
+                                'sender_id' => (string)$user->id,
+                                'click_action' => 'FLUTTER_NOTIFICATION_CLICK',
+                            ])
+                            ->withAndroidConfig(\Kreait\Firebase\Messaging\AndroidConfig::fromArray([
+                                'priority' => 'high',
+                                'notification' => [
+                                    'sound' => 'default',
+                                    'channel_id' => 'bus_tracking_channel',
+                                    'color' => '#1a237e',
+                                ],
+                            ]))
+                            ->withApnsConfig(\Kreait\Firebase\Messaging\ApnsConfig::fromArray([
+                                'payload' => [
+                                    'aps' => [
+                                        'sound' => 'default',
+                                        'alert' => [
+                                            'title' => $title,
+                                            'body' => $body,
+                                        ],
+                                        'badge' => 1,
+                                    ],
+                                ],
+                            ]));
+
+                        $result = $messaging->send($fcmMessage);
+
+                        Log::info('[ChatController@sendMessage] ✅ FCM notification sent successfully (direct)', [
+                            'recipient_id' => $recipient->id,
+                            'message_id' => $result,
+                        ]);
+
+                    } catch (\Kreait\Firebase\Exception\Messaging\InvalidArgument $e) {
+                        Log::error('[ChatController@sendMessage] ❌ FCM InvalidArgument', [
+                            'recipient_id' => $recipient->id,
+                            'error' => $e->getMessage(),
+                            'error_code' => $e->getCode(),
+                        ]);
+                    } catch (\Kreait\Firebase\Exception\Messaging\NotFound $e) {
+                        Log::error('[ChatController@sendMessage] ❌ FCM Token Not Found (Invalid/Expired)', [
+                            'recipient_id' => $recipient->id,
+                            'fcm_token_preview' => substr($recipient->fcm_token, 0, 50) . '...',
+                            'error' => $e->getMessage(),
+                        ]);
+                        // ✅ Remove invalid token
+                        $recipient->update(['fcm_token' => null]);
+                        Log::info('[ChatController@sendMessage] 🗑️ Removed invalid FCM token', [
+                            'recipient_id' => $recipient->id,
+                        ]);
+                    } catch (\Kreait\Firebase\Exception\MessagingException $e) {
+                        Log::error('[ChatController@sendMessage] ❌ FCM MessagingException', [
+                            'recipient_id' => $recipient->id,
+                            'error' => $e->getMessage(),
+                            'error_code' => $e->getCode(),
+                            'errors' => method_exists($e, 'errors') ? $e->errors() : null,
+                        ]);
+                    } catch (\Exception $e) {
+                        Log::error('[ChatController@sendMessage] ❌ FCM General Exception', [
+                            'recipient_id' => $recipient->id,
+                            'error' => $e->getMessage(),
+                            'error_code' => $e->getCode(),
+                            'file' => $e->getFile(),
+                            'line' => $e->getLine(),
+                        ]);
+                    }
+                } catch (\Exception $notificationException) {
+                    Log::error('[ChatController@sendMessage] ❌ Failed to send FCM notification', [
+                        'recipient_id' => $recipient->id,
+                        'error' => $notificationException->getMessage(),
+                        'error_code' => $notificationException->getCode(),
+                        'file' => $notificationException->getFile(),
+                        'line' => $notificationException->getLine(),
+                        'trace' => $notificationException->getTraceAsString(),
+                    ]);
+                    // لا نوقف العملية إذا فشل إرسال الإشعار
+                }
+            } else {
+                Log::info('[ChatController@sendMessage] ⚠️ Skipping FCM notification - no token', [
+                    'recipient_id' => $recipient->id,
+                    'recipient_name' => $recipient->name,
+                ]);
+            }
+        }
+
+        Log::info('[ChatController@sendMessage] ✅✅✅ SUCCESS - RETURNING MESSAGE', [
+            'message_id' => $message->id,
+            'status_code' => 201,
+        ]);
+
+        return response()->json($message, 201);
+    } catch (\Exception $e) {
+        Log::error('[ChatController@sendMessage] ❌ EXCEPTION DURING MESSAGE CREATION', [
+            'exception_message' => $e->getMessage(),
+            'exception_file' => $e->getFile(),
+            'exception_line' => $e->getLine(),
+            'exception_trace' => $e->getTraceAsString(),
+            'message_data' => $messageData,
+        ]);
+        return response()->json([
+            'message' => 'Failed to create message: ' . $e->getMessage()
+        ], 500);
+    }
 }
 
 
@@ -1247,9 +1600,21 @@ public function toggleChatForParents(Request $request, ChatGroup $group)
     }
 
     // Delete message (only for sender or moder)
-    public function deleteMessage(Message $message)
+    public function deleteMessage($groupId, $messageId)
     {
         $user = Auth::user();
+
+        // Find message by ID
+        $message = Message::find($messageId);
+
+        if (!$message) {
+            return response()->json(['message' => 'Message not found'], 404);
+        }
+
+        // Verify message belongs to the group
+        if ($message->chat_group_id != $groupId) {
+            return response()->json(['message' => 'Message does not belong to this group'], 403);
+        }
 
         // Check if user is the sender or has moder badge
         if ($message->sender_id !== $user->id && !$user->hasBadge('moder')) {
@@ -1272,6 +1637,98 @@ public function toggleChatForParents(Request $request, ChatGroup $group)
         return response()->json(['message' => 'Message deleted successfully']);
     }
 
+    /**
+     * رفع ملف فقط (بدون إنشاء رسالة) - للواجبات
+     */
+    public function uploadMediaOnly(Request $request, ChatGroup $group)
+    {
+        try {
+            // Authenticate user using API token
+            $authHeader = $request->header('Authorization');
+            $token = null;
+
+            if ($authHeader && str_starts_with($authHeader, 'Bearer ')) {
+                $token = substr($authHeader, 7);
+            }
+
+            if (!$token) {
+                return response()->json(['message' => 'Unauthorized'], 401);
+            }
+
+            $personalAccessToken = PersonalAccessToken::findToken($token);
+            if (!$personalAccessToken) {
+                return response()->json(['message' => 'Invalid token'], 401);
+            }
+
+            $user = $personalAccessToken->tokenable;
+            if (!$user) {
+                return response()->json(['message' => 'User not found'], 404);
+            }
+
+            // Check if user is a member of the group
+            $isMember = $group->members()->where('user_id', $user->id)->exists();
+            if (!$isMember) {
+                return response()->json(['message' => 'You are not a member of this group'], 403);
+            }
+
+            // Validate request
+            $validator = Validator::make($request->all(), [
+                'media' => 'required|file|mimes:jpeg,jpg,png,gif,mp4,avi,mov,webm|max:10240', // 10MB max
+                'message_type' => 'required|in:image,video',
+            ]);
+
+            if ($validator->fails()) {
+                return response()->json(['errors' => $validator->errors()], 422);
+            }
+
+            // Determine file type
+            $file = $request->file('media');
+            $messageType = $request->input('message_type');
+            $extension = $file->getClientOriginalExtension();
+
+            // Validate file type matches message type
+            $imageExtensions = ['jpeg', 'jpg', 'png', 'gif', 'webp'];
+            $videoExtensions = ['mp4', 'avi', 'mov', 'webm'];
+
+            if ($messageType === 'image' && !in_array(strtolower($extension), $imageExtensions)) {
+                return response()->json(['message' => 'Invalid image file type'], 422);
+            }
+
+            if ($messageType === 'video' && !in_array(strtolower($extension), $videoExtensions)) {
+                return response()->json(['message' => 'Invalid video file type'], 422);
+            }
+
+            // Store file
+            $directory = $messageType === 'image' ? 'chat_media/images' : 'chat_media/videos';
+            $filename = time() . '_' . uniqid() . '.' . $extension;
+            $path = $file->storeAs($directory, $filename, 'public');
+
+            if (!$path) {
+                return response()->json(['message' => 'Failed to upload file'], 500);
+            }
+
+            // Return file URL
+            $url = Storage::disk('public')->url($path);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'File uploaded successfully',
+                'media_path' => $path,
+                'url' => $url,
+            ], 200);
+
+        } catch (\Exception $e) {
+            Log::error('[ChatController@uploadMediaOnly] Error', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'message' => 'Error uploading file: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
     // Get message for editing
     public function getMessageForEdit(Message $message)
     {
@@ -1291,16 +1748,26 @@ public function toggleChatForParents(Request $request, ChatGroup $group)
         return response()->json($message);
     }
 
-    public function updateMessage(Request $request, Message $message)
+    public function updateMessage(Request $request, $groupId, $messageId)
 {
     $user = Auth::user();
+
+    // Find message by ID
+    $message = Message::find($messageId);
+
+    if (!$message) {
+        return response()->json(['message' => 'Message not found'], 404);
+    }
+
+    // Verify message belongs to the group
+    if ($message->chat_group_id != $groupId) {
+        return response()->json(['message' => 'Message does not belong to this group'], 403);
+    }
 
     // Check if user is the sender of the message
     if ($message->sender_id !== $user->id) {
         return response()->json(['message' => 'You can only edit your own messages'], 403);
     }
-
-
 
     $validator = Validator::make($request->all(), [
         'content' => 'required|string|max:1000',
@@ -1321,5 +1788,56 @@ public function toggleChatForParents(Request $request, ChatGroup $group)
     $message->load(['sender:id,name,photo,last_activity', 'repliedMessage.sender:id,name']);
 
     return response()->json($message);
+}
+
+/**
+ * Get recent chat activity for Edura system
+ */
+public function getEduraChatActivity(Request $request)
+{
+    try {
+        $limit = $request->input('limit', 15);
+        $hours = $request->input('hours', 72);
+
+        // Get recent messages
+        $recentMessages = Message::whereNotNull('chat_group_id')
+            ->where('created_at', '>=', now()->subHours($hours))
+            ->with(['sender:id,name', 'chatGroup:id,name'])
+            ->orderBy('created_at', 'desc')
+            ->limit($limit)
+            ->get()
+            ->map(function ($message) {
+                return [
+                    'id' => $message->id,
+                    'type' => 'message',
+                    'content' => $message->content ?? 'رسالة وسائط',
+                    'created_at' => $message->created_at->toISOString(),
+                    'group' => [
+                        'id' => $message->chatGroup->id ?? null,
+                        'name' => $message->chatGroup->name ?? 'مجموعة محذوفة',
+                    ],
+                    'actor' => [
+                        'id' => $message->sender->id ?? null,
+                        'name' => $message->sender->name ?? 'مستخدم محذوف',
+                    ],
+                ];
+            });
+
+        return response()->json([
+            'success' => true,
+            'activities' => $recentMessages,
+        ]);
+    } catch (\Exception $e) {
+        Log::error('[getEduraChatActivity] Error', [
+            'message' => $e->getMessage(),
+            'trace' => $e->getTraceAsString(),
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'activities' => [],
+            'message' => 'فشل في جلب النشاط',
+        ], 500);
+    }
 }
 }

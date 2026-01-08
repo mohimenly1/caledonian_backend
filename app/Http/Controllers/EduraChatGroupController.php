@@ -288,6 +288,7 @@ public function getGroupMessagesStats($groupId)
                     'name' => $group->name,
                     'description' => $group->description,
                     'is_public' => $group->is_public,
+                    'chat_disabled_for_parents' => (bool) $group->chat_disabled_for_parents, // ✅ إضافة chat_disabled_for_parents
                     'creator_name' => $group->creator ? $group->creator->name : 'غير معروف',
                     'class_name' => $group->class ? $group->class->name : 'عام',
                     'section_name' => $group->section ? $group->section->name : null,
@@ -365,6 +366,7 @@ public function getGroupMessagesStats($groupId)
                         'name' => $group->name,
                         'description' => $group->description,
                         'is_public' => $group->is_public,
+                        'chat_disabled_for_parents' => (bool) $group->chat_disabled_for_parents, // ✅ إضافة chat_disabled_for_parents
                         'creator' => $group->creator,
                         'class' => $group->class,
                         'section' => $group->section,
@@ -390,6 +392,131 @@ public function getGroupMessagesStats($groupId)
                 'success' => false,
                 'message' => 'فشل في جلب تفاصيل المجموعة'
             ], 404);
+        }
+    }
+
+    /**
+     * ✅ جلب مجموعات المعلم (Chat Groups) التي ينتمي إليها
+     */
+    public function getTeacherChatGroups($teacherId, Request $request)
+    {
+        try {
+            Log::info('[EduraChatGroupController@getTeacherChatGroups] Request received', [
+                'teacher_id' => $teacherId,
+                'request_params' => $request->all(),
+            ]);
+
+            // ✅ جلب المجموعات التي يكون المعلم عضواً فيها
+            // ✅ استخدام whereHas للبحث في pivot table
+            $query = ChatGroup::whereHas('members', function($q) use ($teacherId) {
+                $q->where('users.id', $teacherId)
+                  ->where(function($subQ) {
+                      $subQ->where('group_members.is_blocked', false)
+                           ->orWhereNull('group_members.is_blocked');
+                  });
+            })
+            ->withCount(['messages', 'members'])
+            ->with(['class', 'section', 'creator'])
+            ->orderBy('created_at', 'desc');
+
+            // ✅ Log للتحقق من الـ query
+            Log::debug('[EduraChatGroupController@getTeacherChatGroups] Query built', [
+                'teacher_id' => $teacherId,
+                'sql' => $query->toSql(),
+                'bindings' => $query->getBindings(),
+            ]);
+
+            // ✅ Test query - جلب عدد المجموعات قبل pagination
+            $totalBeforePagination = $query->count();
+            Log::info('[EduraChatGroupController@getTeacherChatGroups] Total groups before pagination', [
+                'teacher_id' => $teacherId,
+                'total' => $totalBeforePagination,
+            ]);
+
+            // ✅ تطبيق الفلترة
+            if ($request->has('search') && $request->search) {
+                $search = $request->search;
+                $query->where(function($q) use ($search) {
+                    $q->where('name', 'like', "%{$search}%")
+                      ->orWhere('description', 'like', "%{$search}%");
+                });
+            }
+
+            if ($request->has('type') && $request->type) {
+                if ($request->type === 'public') {
+                    $query->where('is_public', true);
+                } elseif ($request->type === 'private') {
+                    $query->where('is_public', false);
+                }
+            }
+
+            if ($request->has('class') && $request->class) {
+                $query->whereHas('class', function($q) use ($request) {
+                    $q->where('name', 'like', "%{$request->class}%");
+                });
+            }
+
+            // ✅ التقسيم إلى صفحات
+            $perPage = $request->per_page ?? 15;
+            $groups = $query->paginate($perPage);
+
+            Log::info('[EduraChatGroupController@getTeacherChatGroups] Groups found', [
+                'teacher_id' => $teacherId,
+                'groups_count' => $groups->count(),
+                'total' => $groups->total(),
+            ]);
+
+            // ✅ تنسيق البيانات للاستجابة
+            $formattedGroups = $groups->map(function($group) use ($teacherId) {
+                // ✅ جلب دور المعلم في المجموعة (admin أو member)
+                $memberPivot = $group->members()
+                    ->where('users.id', $teacherId)
+                    ->first();
+
+                $isAdmin = $memberPivot ? (bool) $memberPivot->pivot->is_admin : false;
+
+                return [
+                    'id' => $group->id,
+                    'name' => $group->name,
+                    'description' => $group->description,
+                    'is_public' => $group->is_public,
+                    'chat_disabled_for_parents' => (bool) $group->chat_disabled_for_parents,
+                    'creator_name' => $group->creator ? $group->creator->name : 'غير معروف',
+                    'class_id' => $group->class_id,
+                    'class_name' => $group->class ? $group->class->name : 'عام',
+                    'section_id' => $group->section_id,
+                    'section_name' => $group->section ? $group->section->name : null,
+                    'members_count' => $group->members_count,
+                    'messages_count' => $group->messages_count,
+                    'image_url' => $group->image_url,
+                    'created_at' => $group->created_at->format('Y-m-d H:i:s'),
+                    'last_activity' => $group->messages()->latest()->first()?->created_at?->format('Y-m-d H:i:s'),
+                    'is_admin' => $isAdmin, // ✅ إضافة دور المعلم في المجموعة
+                ];
+            });
+
+            return response()->json([
+                'success' => true,
+                'data' => $formattedGroups,
+                'meta' => [
+                    'current_page' => $groups->currentPage(),
+                    'last_page' => $groups->lastPage(),
+                    'per_page' => $groups->perPage(),
+                    'total' => $groups->total(),
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error fetching teacher chat groups: ' . $e->getMessage(), [
+                'teacher_id' => $teacherId,
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'فشل في جلب مجموعات المعلم',
+                'error' => $e->getMessage()
+            ], 500);
         }
     }
 }

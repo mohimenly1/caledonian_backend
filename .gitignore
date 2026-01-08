@@ -21,3 +21,13 @@ yarn-error.log
 /.fleet
 /.idea
 /.vscode
+.DS_Store
+/.DS_Store
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# editor / tooling
+.specstory/
+.cursorindexingignore

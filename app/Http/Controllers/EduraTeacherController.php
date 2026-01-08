@@ -138,5 +138,69 @@ class EduraTeacherController extends Controller
 
         return response()->json($teachers);
     }
+
+    /**
+     * ⭐⭐ جلب قائمة المعلمين المحذوفين (soft deleted) مع المقررات والفصول والشعب المسندة إليهم.
+     * هذا الـ Endpoint مخصص لنظام Edura - قسم الأرشيف.
+     */
+    public function getArchivedTeachersWithAssignments(Request $request)
+    {
+        // 1. جلب المعلمين المحذوفين (soft deleted) مع فلترة user_type
+        $teachersQuery = User::onlyTrashed()
+                        ->where('user_type', 'teacher')
+                        ->select('id', 'name', 'username', 'email', 'phone', 'address', 'deleted_at'); // جلب بيانات المعلم الكاملة
+
+        // 2. تحميل العلاقات المتداخلة بكفاءة (Eager Loading) - بما في ذلك المحذوفة
+        $teachersQuery->with([
+            'teacherCourseAssignments' => function ($query) {
+                $query->withTrashed() // ✅ جلب حتى المحذوفة soft delete
+                      ->select('id', 'teacher_id', 'course_offering_id', 'section_id', 'deleted_at')
+                      ->with([
+                          'section:id,name', 
+                          'courseOffering' => function ($q) {
+                              $q->select('id', 'subject_id', 'class_id')
+                                ->with([
+                                    'subject:id,name', 
+                                    'schoolClass:id,name'
+                                ]);
+                          }
+                      ]);
+            }
+        ]);
+
+        // 3. تطبيق البحث إذا كان موجوداً
+        if ($request->filled('search')) {
+            $searchTerm = $request->input('search');
+            $teachersQuery->where(function ($q) use ($searchTerm) {
+                $q->where('name', 'like', "%{$searchTerm}%")
+                  ->orWhere('username', 'like', "%{$searchTerm}%")
+                  ->orWhere('email', 'like', "%{$searchTerm}%")
+                  ->orWhere('phone', 'like', "%{$searchTerm}%")
+                  ->orWhere('address', 'like', "%{$searchTerm}%");
+            });
+        }
+
+        // 4. تطبيق الـ Pagination
+        $teachers = $teachersQuery->orderBy('deleted_at', 'desc')
+                                  ->paginate($request->input('per_page', 15))
+                                  ->withQueryString();
+
+        // 5. إعادة هيكلة البيانات لتكون أنظف لـ Edura
+        $teachers->getCollection()->transform(function ($teacher) {
+            $teacher->assignments = $teacher->teacherCourseAssignments->map(function ($assignment) {
+                return [
+                    'assignment_id' => $assignment->id,
+                    'subject_name' => $assignment->courseOffering->subject->name ?? 'مادة غير محددة',
+                    'class_name' => $assignment->courseOffering->schoolClass->name ?? 'فصل غير محدد',
+                    'section_name' => $assignment->section->name ?? 'شعبة غير محددة',
+                    'deleted_at' => $assignment->deleted_at ? $assignment->deleted_at->format('Y-m-d H:i:s') : null,
+                ];
+            });
+            unset($teacher->teacherCourseAssignments); // إزالة البيانات الأصلية المعقدة
+            return $teacher;
+        });
+
+        return response()->json($teachers);
+    }
 }
 

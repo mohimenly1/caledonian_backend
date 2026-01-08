@@ -55,8 +55,10 @@ class TelescopeServiceProvider extends TelescopeApplicationServiceProvider
      */
     protected function gate(): void
     {
-        Gate::define('viewTelescope', function ($user) {
-            return true;  // غير آمن للإنتاج!
+        Gate::define('viewTelescope', function ($user = null) {
+            // Allow access for all users (authenticated or unauthenticated)
+            // In production, you should restrict this to specific users
+            return true;
         });
     }
 }

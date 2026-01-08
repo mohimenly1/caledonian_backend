@@ -21,6 +21,9 @@ class Message extends Model
         'edited_at', // إضافة هذا الحقل
         'is_deleted',
         'deleted_at',
+        'assignment_id', // إضافة هذا الحقل لربط الرسالة بالواجب
+        'assignment_type', // نوع الواجب (assignment/note)
+        'teacher_external_id', // ID المعلم في school-app
     ];
 
     protected $casts = [
