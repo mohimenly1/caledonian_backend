@@ -71,19 +71,11 @@ class EduraAcademicDataController extends Controller
             'full_query' => $request->query(),
         ]);
 
-        Log::info('[SchoolApp] getClassesAndSections request received.', [
-            'study_year_id' => $request->input('study_year_id'),
-            'grade_level_id' => $request->input('grade_level_id'),
-            'full_query' => $request->query(),
-        ]);
-
         $query = ClassRoom::query()
-                    ->where('study_year_id', '=', $request->study_year_id)
                     ->where('study_year_id', '=', $request->study_year_id)
                     ->with('sections:id,name,class_id'); // جلب الشعب التابعة
 
         if ($request->filled('grade_level_id')) {
-            $query->where('grade_level_id', '=', $request->grade_level_id);
             $query->where('grade_level_id', '=', $request->grade_level_id);
         }
 
@@ -96,91 +88,7 @@ class EduraAcademicDataController extends Controller
             'class_ids' => $classes->pluck('id'),
         ]);
 
-        Log::info('[SchoolApp] getClassesAndSections returning response.', [
-            'study_year_id' => $request->input('study_year_id'),
-            'grade_level_id' => $request->input('grade_level_id'),
-            'class_count' => $classes->count(),
-            'class_ids' => $classes->pluck('id'),
-        ]);
-
         return response()->json($classes);
-    }
-
-    /**
-     * إرجاع كتالوج كامل للفصول والشعب مع إمكانية التصفية الاختيارية
-     */
-    public function getClassesCatalog(Request $request)
-    {
-        $query = ClassRoom::query()
-            ->with('sections:id,name,class_id')
-            ->select(['id', 'name', 'grade_level_id', 'study_year_id'])
-            ->orderBy('study_year_id', 'asc')
-            ->orderBy('name', 'asc');
-
-        if ($request->filled('study_year_id')) {
-            $query->where('study_year_id', '=', $request->integer('study_year_id'));
-        }
-
-        if ($request->filled('grade_level_id')) {
-            $query->where('grade_level_id', '=', $request->integer('grade_level_id'));
-        }
-
-        $classes = $query->get()->map(function (ClassRoom $class) {
-            return [
-                'id' => $class->id,
-                'name' => $class->name,
-                'grade_level_id' => $class->grade_level_id,
-                'study_year_id' => $class->study_year_id,
-                'sections' => $class->sections->map(fn ($section) => [
-                    'id' => $section->id,
-                    'name' => $section->name,
-                ])->values(),
-            ];
-        });
-
-        return response()->json([
-            'study_years' => StudyYear::select(['id', 'name'])->orderBy('name', 'asc')->get(),
-            'grade_levels' => GradeLevel::select(['id', 'name'])->orderBy('name', 'asc')->get(),
-            'classes' => $classes,
-        ]);
-    }
-
-    /**
-     * جلب فهرس كامل للفصول والشعب مع إمكانية الفلترة اختيارياً
-     */
-    public function getAllClassesCatalog(Request $request)
-    {
-        $query = ClassRoom::with('sections:id,name,class_id')
-            ->select(['id', 'name', 'grade_level_id', 'study_year_id'])
-            ->orderByDesc('study_year_id')
-            ->orderBy('name');
-
-        if ($request->filled('study_year_id')) {
-            $query->where('study_year_id', '=', $request->study_year_id);
-        }
-
-        if ($request->filled('grade_level_id')) {
-            $query->where('grade_level_id', '=', $request->grade_level_id);
-        }
-
-        $classes = $query->get()->map(function (ClassRoom $class) {
-            return [
-                'id' => $class->id,
-                'name' => $class->name,
-                'grade_level_id' => $class->grade_level_id,
-                'study_year_id' => $class->study_year_id,
-                'sections' => $class->sections->map(fn ($section) => [
-                    'id' => $section->id,
-                    'name' => $section->name,
-                ])->values(),
-            ];
-        })->values();
-
-        return response()->json([
-            'study_years' => StudyYear::orderByDesc('id')->get(['id', 'name']),
-            'grade_levels' => GradeLevel::orderBy('id')->get(['id', 'name']),
-            'classes' => $classes,
-        ]);
     }
 
     /**
